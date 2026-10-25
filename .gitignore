@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Keystore（切勿提交签名文件）
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 注意：不要忽略 assets/ 下的 pkgserver.apk 与 scrcpy-server，
+# 也不要忽略 app/src/main/jniLibs/ 下的 .so ——它们是运行期必需文件。

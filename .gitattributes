@@ -1,0 +1,10 @@
+# Shell 脚本在所有平台保持 LF（CI 在 Linux 上运行）
+gradlew text eol=lf
+*.sh text eol=lf
+
+# 二进制资源禁止 CRLF 转换
+*.so binary
+*.apk binary
+*.png binary
+*.ttf binary
+*.jar binary
