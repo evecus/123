@@ -258,7 +258,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
                         Text(
-                            "输入设备 IP（默认端口 5555，支持 IPv6）",
+                            "输入设备 IP",
                             fontSize = 13.sp,
                             color = TextMuted,
                             fontFamily = JetBrainsMono
