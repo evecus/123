@@ -629,7 +629,14 @@ private fun MirroredTexture(
             }
         }
 
-        if (areaW <= 0f || areaH <= 0f || devW <= 0 || devH <= 0 || videoW <= 0 || videoH <= 0) {
+        // 注意：守卫只能用 devW/devH 判断，绝不能加 videoW/videoH！
+        // videoW/videoH 初始为 0、握手后才赋值，若纳入守卫，握手会导致 Compose
+        // 从占位分支切换到正常分支——两个分支的 AndroidView 是不同 slot，
+        // TextureView 会被销毁重建，解码器绑定的 SurfaceTexture 随之失效，画面永久黑屏。
+        //（devW/devH 来自 ScrcpyManager 的默认值 1080x1920，首次组合即进入正常分支，
+        //  握手后仅是同 slot 重组，AndroidView 不会重建。）
+        // 握手前 videoW/videoH 为 0 时的触摸由 ScrcpySession.sendTouch 的尺寸守卫丢弃。
+        if (areaW <= 0f || areaH <= 0f || devW <= 0 || devH <= 0) {
             // 设备尺寸未知（尚未握手）：先铺满占位
             Box(
                 modifier = Modifier
