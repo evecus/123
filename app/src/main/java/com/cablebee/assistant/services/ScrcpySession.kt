@@ -136,6 +136,10 @@ class ScrcpySession(
         surface = Surface(surfaceTexture)
         codec = MediaCodec.createDecoderByType("video/avc").also { c ->
             val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
+            // 允许横竖屏切换（分辨率变化）时解码器自适应，而不必重建
+            val maxEdge = maxOf(deviceWidth, deviceHeight)
+            fmt.setInteger(MediaFormat.KEY_MAX_WIDTH, maxEdge)
+            fmt.setInteger(MediaFormat.KEY_MAX_HEIGHT, maxEdge)
             c.configure(fmt, surface, null, 0)
             c.start()
         }
@@ -191,8 +195,15 @@ class ScrcpySession(
                                 outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                                     val of = c.outputFormat
                                     Log.i(TAG, "output format changed: $of")
-                                    val outW = of.getInteger(MediaFormat.KEY_WIDTH)
-                                    val outH = of.getInteger(MediaFormat.KEY_HEIGHT)
+                                    // 解码器输出宽高可能是按 16 对齐的（如 1280 对 1272），需用裁剪框得到真实视频尺寸，
+                                    // 否则显示比例与触摸坐标映射会有偏差
+                                    var outW = of.getInteger(MediaFormat.KEY_WIDTH)
+                                    var outH = of.getInteger(MediaFormat.KEY_HEIGHT)
+                                    if (of.containsKey("crop-left") && of.containsKey("crop-right") &&
+                                        of.containsKey("crop-top") && of.containsKey("crop-bottom")) {
+                                        outW = of.getInteger("crop-right") - of.getInteger("crop-left") + 1
+                                        outH = of.getInteger("crop-bottom") - of.getInteger("crop-top") + 1
+                                    }
                                     if (outW > 0 && outH > 0) {
                                         surfaceTexture.setDefaultBufferSize(outW, outH)
                                         onEvent("connected", mapOf(

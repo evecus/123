@@ -644,16 +644,23 @@ private fun MirroredTexture(
             return@BoxWithConstraints
         }
 
-        val devAspect = devH.toFloat() / devW.toFloat()
+        // 可视区域的宽高比（宽/高）：
+        //  - 竖屏设备 < 1，横屏设备 > 1
+        //  - 手机端横屏设备会被旋转 90°，可视区域的宽高与设备正好相反
+        // 注意：这里必须与 areaAspect 同为「宽/高」，否则竖屏设备会被算成又宽又扁的框。
+        val visAspect = if (shouldRotate) devH.toFloat() / devW.toFloat()
+                        else devW.toFloat() / devH.toFloat()
         val areaAspect = areaW / areaH
         val renderWpx: Float
         val renderHpx: Float
-        if (devAspect > areaAspect) {
+        if (visAspect > areaAspect) {
+            // 可视区域比容器更“宽”：以宽度为准
             renderWpx = areaW
-            renderHpx = areaW / devAspect
+            renderHpx = areaW / visAspect
         } else {
+            // 否则以高度为准
             renderHpx = areaH
-            renderWpx = areaH * devAspect
+            renderWpx = areaH * visAspect
         }
         val visualW = with(density) { renderWpx.toDp() }
         val visualH = with(density) { renderHpx.toDp() }
@@ -689,17 +696,21 @@ private fun MirroredTexture(
                     }
                 }
         ) {
-            if (shouldRotate) {
-                // 预旋转布局：宽高互换后顺时针旋转 90°（对应 Flutter RotatedBox quarterTurns:1）
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .size(visualH, visualW)
-                        .rotate(90f)
-                ) {
-                    AndroidView(factory = textureViewFactory, modifier = Modifier.fillMaxSize())
-                }
-            } else {
+            // AndroidView 在组合树中的位置固定：设备横竖屏切换时只改变尺寸/旋转，
+            // 不会重建 TextureView（重建会让解码器绑定的 surface 失效，画面变黑）。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .then(
+                        if (shouldRotate) {
+                            // 预旋转布局：宽高互换后顺时针旋转 90°（对应 Flutter RotatedBox quarterTurns:1）
+                            // 用 requiredSize：互换后的宽度超过父容器宽度，普通 size 会被父约束截断
+                            Modifier.requiredSize(visualH, visualW).rotate(90f)
+                        } else {
+                            Modifier.fillMaxSize()
+                        }
+                    )
+            ) {
                 AndroidView(factory = textureViewFactory, modifier = Modifier.fillMaxSize())
             }
         }
