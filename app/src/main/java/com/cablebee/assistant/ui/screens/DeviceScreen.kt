@@ -315,6 +315,7 @@ private fun DeviceSideNav(
             .width(RailWidth)
             .fillMaxHeight()
             .background(Bg1)
+            .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp)
     ) {
@@ -373,6 +374,8 @@ private fun ScrollableBottomNav(
         modifier = Modifier
             .fillMaxWidth()
             .background(Bg1)
+            // 避让系统手势条/导航栏（边到边模式下底栏否则会与小白条重叠）
+            .navigationBarsPadding()
     ) {
         Divider(color = Bg3, thickness = 1.dp)
         Row(
