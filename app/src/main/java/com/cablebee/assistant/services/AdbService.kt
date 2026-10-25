@@ -174,7 +174,7 @@ class AdbService {
 
     suspend fun pair(host: String, port: Int, code: String): AdbCommandResult {
         return try {
-            val out = adbPair(host, port, code)
+            val out = withContext(Dispatchers.IO) { adbPair(host, port, code) }
             AdbCommandResult(0, out, "")
         } catch (e: Exception) {
             AdbCommandResult(1, "", e.message ?: "pair failed")
@@ -504,7 +504,15 @@ class AdbService {
         val output    get() = (stdout + stderr).trim()
     }
 
-    private fun adb(vararg args: String, timeoutMs: Long = 15_000): AdbResult {
+    /**
+     * 所有 adb 子进程调用的统一入口。
+     * 内部使用 Process.waitFor / Thread.join 会阻塞线程，因此必须在 IO 线程执行，
+     * 否则从 Compose 的 rememberCoroutineScope()（Main 线程）调用时会冻结 UI 并触发 ANR。
+     */
+    private suspend fun adb(vararg args: String, timeoutMs: Long = 15_000): AdbResult =
+        withContext(Dispatchers.IO) { adbBlocking(*args, timeoutMs = timeoutMs) }
+
+    private fun adbBlocking(vararg args: String, timeoutMs: Long = 15_000): AdbResult {
         val path = BinaryManager.getAdbPath() ?: return AdbResult(1, "", "adb not ready")
         val cmd = mutableListOf(path) + args.toList()
         Log.d(TAG, "exec: ${cmd.joinToString(" ")}")

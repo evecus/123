@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -39,18 +40,59 @@ import com.cablebee.assistant.services.PkgServerService
 import com.cablebee.assistant.ui.components.CbeeLoader
 import com.cablebee.assistant.ui.components.WidePageBody
 import com.cablebee.assistant.ui.theme.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ── 数据模型 ─────────────────────────────────────────────────────────────────
 
-private class ProcInfo {
-    var pkg: String = ""
-    var kbRss: Long = 0
-    var label: String? = null
-    var iconBytes: ByteArray? = null
-
+private class ProcInfo(val pkg: String, val kbRss: Long) {
     val displayName: String
-        get() = if (!label.isNullOrEmpty()) label!! else if (pkg.contains('.')) pkg.split('.').last() else pkg
+        get() = if (pkg.contains('.')) pkg.split('.').last() else pkg
+}
+
+/** 把同一应用的多个进程（com.foo、com.foo:remote …）合并为一项，按内存降序取前 40。 */
+private fun groupAndSort(raw: List<Pair<String, Long>>): List<ProcInfo> {
+    val sum = HashMap<String, Long>()
+    for ((name, kb) in raw) {
+        if (kb <= 0 || name.isEmpty()) continue
+        val base = name.substringAfterLast('/').substringBefore(':')
+        if (base.isEmpty() || base.startsWith("[")) continue
+        sum[base] = (sum[base] ?: 0L) + kb
+    }
+    return sum.entries
+        .sortedByDescending { it.value }
+        .take(40)
+        .map { ProcInfo(it.key, it.value) }
+}
+
+/** `ps -A -o RSS,NAME` 的输出：每行 "<rss_kb> <name>" */
+private fun parsePs(out: String): List<ProcInfo> {
+    val raw = ArrayList<Pair<String, Long>>()
+    for (line in out.lineSequence()) {
+        val parts = line.trim().split(Regex("\\s+"))
+        if (parts.size < 2) continue
+        val kb = parts[0].toLongOrNull() ?: continue
+        raw.add(parts[1] to kb)
+    }
+    return groupAndSort(raw)
+}
+
+/** dumpsys meminfo 兜底命令的输出：每行 "<name> <kb>" */
+private fun parseDumpsys(out: String): List<ProcInfo> {
+    val raw = ArrayList<Pair<String, Long>>()
+    for (line in out.lineSequence()) {
+        val parts = line.trim().split(Regex("\\s+"))
+        if (parts.size < 2) continue
+        val name = parts[0].replace(Regex("[()]"), "").trim()
+        val kb = parts[1].toLongOrNull() ?: continue
+        if (name == "(pid") continue
+        raw.add(name to kb)
+    }
+    return groupAndSort(raw)
 }
 
 // ── Screen ───────────────────────────────────────────────────────────────────
@@ -69,86 +111,72 @@ fun ProcessScreen(
     var confirmStopPkg by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    val pkgCache = remember { mutableMapOf<String, PkgInfo>() }
+    // 应用名/图标缓存。用 SnapshotStateMap，补全完成后列表会自动重组
+    val pkgInfos = remember { mutableStateMapOf<String, PkgInfo>() }
+    val pkgMissed = remember { mutableSetOf<String>() }          // 查询失败的包，避免每次刷新都重试
     var pkgServer by remember { mutableStateOf<PkgServerService?>(null) }
 
+    // 防止重复/并发 load：新的 load 会取消旧的，旧的结束时不得改写 loading
+    var loadJob by remember { mutableStateOf<Job?>(null) }
+    val loadGen = remember { intArrayOf(0) }
+
     fun load() {
-        scope.launch {
+        loadJob?.cancel()
+        val myGen = ++loadGen[0]
+        loadJob = scope.launch {
             loading = true
-            procs = emptyList()
-            val server = pkgServer ?: PkgServerService(adbService, context).also { pkgServer = it }
+            try {
+                val server = pkgServer ?: PkgServerService(adbService, context).also { pkgServer = it }
 
-            // 先获取内存信息并立即显示
-            val memRes = adbService.shell("cat /proc/meminfo | grep -E \"^MemTotal:|^MemAvailable:\"")
-            var total = 0L
-            var avail = 0L
-            for (line in memRes.stdout.split("\n")) {
-                val m = Regex("(\\w+):\\s+(\\d+)").find(line) ?: continue
-                val kb = m.groupValues[2].toLongOrNull() ?: 0L
-                when (m.groupValues[1]) {
-                    "MemTotal" -> total = kb
-                    "MemAvailable" -> avail = kb
-                }
-            }
-            totalKb = total
-            usedKb = total - avail
-
-            // 获取进程列表（dumpsys meminfo 最可靠）
-            val procRes = adbService.shell(
-                "dumpsys meminfo 2>/dev/null | grep -E '^\\s+[0-9,]+K:' | " +
-                    "sed 's/,//g; s/K://' | awk '{kb=\$1; pkg=\$2; if(pkg~/\\(/)pkg=\$2; print pkg, kb}' | " +
-                    "sort -rn -k2 | head -40"
-            )
-
-            val list = mutableListOf<ProcInfo>()
-            for (line in procRes.stdout.split("\n")) {
-                val parts = line.trim().split(Regex("\\s+"))
-                if (parts.size < 2) continue
-                val pkg = parts[0].replace(Regex("[()]"), "").trim()
-                val kb = parts[1].toLongOrNull() ?: 0L
-                if (kb <= 0 || pkg.isEmpty() || pkg == "(pid") continue
-                list.add(ProcInfo().apply { this.pkg = pkg; this.kbRss = kb })
-            }
-
-            if (list.isEmpty()) {
-                val psRes = adbService.shell("ps -A -o NAME,RSS 2>/dev/null | tail -n +2")
-                for (line in psRes.stdout.split("\n")) {
-                    val parts = line.trim().split(Regex("\\s+"))
-                    if (parts.size < 2) continue
-                    val kb = parts.last().toLongOrNull() ?: 0L
-                    val name = parts.first()
-                    if (kb <= 0 || name.isEmpty()) continue
-                    list.add(ProcInfo().apply { this.pkg = name; this.kbRss = kb })
-                }
-                list.sortByDescending { it.kbRss }
-            }
-
-            procs = list.take(40)
-            loading = false
-
-            // 用 PkgServer 补充应用名与图标
-            for (proc in procs) {
-                val cached = pkgCache[proc.pkg]
-                if (cached != null) {
-                    proc.label = cached.label
-                    proc.iconBytes = cached.icon
-                }
-            }
-            val toFetch = procs
-                .filter { !pkgCache.containsKey(it.pkg) && it.pkg.contains('.') }
-                .map { it.pkg }
-                .toSet()
-            for (pkgName in toFetch) {
-                val info = try {
-                    server.getPackage(pkgName)
-                } catch (_: Exception) { null } ?: continue
-                pkgCache[pkgName] = info
-                for (proc in procs) {
-                    if (proc.pkg == pkgName) {
-                        proc.label = info.label
-                        proc.iconBytes = info.icon
+                // 1) 内存概览（shell 已在 IO 线程执行）
+                val memRes = adbService.shell("cat /proc/meminfo | grep -E \"^MemTotal:|^MemAvailable:\"")
+                var total = 0L
+                var avail = 0L
+                for (line in memRes.stdout.split("\n")) {
+                    val m = Regex("(\\w+):\\s+(\\d+)").find(line) ?: continue
+                    val kb = m.groupValues[2].toLongOrNull() ?: 0L
+                    when (m.groupValues[1]) {
+                        "MemTotal" -> total = kb
+                        "MemAvailable" -> avail = kb
                     }
                 }
+                totalKb = total
+                usedKb = total - avail
+
+                // 2) 进程列表：优先用 ps（几十毫秒）。
+                //    dumpsys meminfo 在部分 ROM（如 ColorOS）上要数秒，还会解冻所有被冻结的进程，只作兜底。
+                val psOut = adbService.shell("ps -A -o RSS,NAME 2>/dev/null | tail -n +2").stdout
+                var list = withContext(Dispatchers.Default) { parsePs(psOut) }
+                if (list.isEmpty()) {
+                    val dumpOut = adbService.shell(
+                        "dumpsys meminfo 2>/dev/null | grep -E '^\\s+[0-9,]+K:' | " +
+                            "sed 's/,//g; s/K://' | awk '{kb=\$1; pkg=\$2; if(pkg~/\\(/)pkg=\$2; print pkg, kb}' | " +
+                            "sort -rn -k2 | head -80",
+                        timeoutMs = 30_000
+                    ).stdout
+                    list = withContext(Dispatchers.Default) { parseDumpsys(dumpOut) }
+                }
+                procs = list
+                loading = false
+
+                // 3) 后台逐个补全应用名与图标。
+                //    每次 getPackage 都会拉起一个 app_process(JVM)，很慢，所以：
+                //    只在 IO 线程执行、可随时被新的 load 取消、失败的包不重复查询。
+                val toFetch = list.map { it.pkg }
+                    .filter { it.contains('.') && !pkgInfos.containsKey(it) && it !in pkgMissed }
+                for (name in toFetch) {
+                    ensureActive()
+                    val info = try {
+                        withContext(Dispatchers.IO) { server.getPackage(name) }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (info != null) pkgInfos[name] = info else pkgMissed.add(name)
+                }
+            } finally {
+                if (loadGen[0] == myGen) loading = false
             }
         }
     }
@@ -307,18 +335,19 @@ fun ProcessScreen(
                                 }
                             }
                         } else {
-                            items(procs) { p ->
+                            items(procs, key = { it.pkg }) { p ->
+                                val info = pkgInfos[p.pkg]
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(start = 16.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    ProcIcon(p)
+                                    ProcIcon(p.pkg, info?.icon)
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            p.displayName,
+                                            info?.label?.takeIf { it.isNotEmpty() } ?: p.displayName,
                                             fontFamily = SpaceMono,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold,
@@ -430,14 +459,18 @@ fun ProcessScreen(
 // ── 进程图标 ─────────────────────────────────────────────────────────────────
 
 @Composable
-private fun ProcIcon(proc: ProcInfo) {
-    val isSystem = proc.pkg.startsWith("com.android") ||
-        proc.pkg.startsWith("android") ||
-        proc.pkg.startsWith("system")
+private fun ProcIcon(pkg: String, iconBytes: ByteArray?) {
+    val isSystem = pkg.startsWith("com.android") ||
+        pkg.startsWith("android") ||
+        pkg.startsWith("system")
     val iconColor = if (isSystem) TextMuted else Primary
-    val bitmap = remember(proc.iconBytes) {
-        proc.iconBytes?.let {
-            runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull()
+    val bitmap by produceState<ImageBitmap?>(null, iconBytes) {
+        value = iconBytes?.let { bytes ->
+            withContext(Dispatchers.Default) {
+                runCatching {
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }.getOrNull()
+            }
         }
     }
     Box(
@@ -447,9 +480,10 @@ private fun ProcIcon(proc: ProcInfo) {
             .background(iconColor.copy(alpha = 0.1f)),
         contentAlignment = Alignment.Center
     ) {
-        if (bitmap != null) {
+        val bmp = bitmap
+        if (bmp != null) {
             androidx.compose.foundation.Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = bmp,
                 contentDescription = null,
                 modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)),
                 contentScale = ContentScale.Crop
