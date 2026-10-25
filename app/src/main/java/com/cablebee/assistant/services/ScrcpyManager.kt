@@ -26,9 +26,17 @@ class ScrcpyManager(
     @Volatile var connected: Boolean = false; private set
     @Volatile var connecting: Boolean = false; private set
 
-    /** 设备分辨率，握手成功后由 session 写入 */
+    /** 设备显示分辨率（crop 后真实尺寸，握手/格式变化时由 session 写入，仅用于 UI 布局） */
     @Volatile var deviceWidth: Int = 1080; private set
     @Volatile var deviceHeight: Int = 1920; private set
+
+    /**
+     * 服务端视频编码尺寸（握手 codecMeta，round8 后）。
+     * scrcpy 服务端 PositionMapper 会严格校验触摸事件中的 screenSize 与该尺寸一致，
+     * 不一致时静默丢弃事件，因此它是指触摸坐标映射的唯一基准。
+     */
+    @Volatile var videoWidth: Int = 0; private set
+    @Volatile var videoHeight: Int = 0; private set
 
     /**
      * 启动一次投屏会话。
@@ -52,27 +60,32 @@ class ScrcpyManager(
             val (tunedMaxSize, tunedBitRate, tunedFps) = autoTuneByResolution(maxSize, bitRateMbps, maxFps)
             onEvent("status", mapOf("msg" to "正在推送 server..."))
 
-            // 1. 推送 scrcpy-server（优先 /sdcard/，回退 /data/local/tmp/）
+            // 1. 推送 scrcpy-server（优先 /data/local/tmp/，回退 /sdcard/）
+            //    /data/local/tmp 位于可执行分区，app_process 能正常加载 dex；
+            //    /sdcard 是 FUSE + noexec 且 dalvik-cache 不可写，Android 5.0 上会报
+            //    "Dex cache directory isn't writable / 无法打开DEX文件"。
             val serverBytes = try {
                 context.assets.open("scrcpy-server").use { it.readBytes() }
             } catch (e: Exception) {
                 onEvent("error", mapOf("message" to "无法读取 scrcpy-server 资源: ${e.message}"))
                 return@withContext false
             }
-            var remotePath = "/sdcard/scrcpy_server.apk"
+            var remotePath = "/data/local/tmp/scrcpy_server.apk"
             var pushRes = adb.pushAssetFromBytes(serverBytes, "scrcpy-server.apk", remotePath)
             if (!pushRes.isSuccess) {
-                remotePath = "/data/local/tmp/scrcpy_server.apk"
+                remotePath = "/sdcard/scrcpy_server.apk"
                 pushRes = adb.pushAssetFromBytes(serverBytes, "scrcpy-server.apk", remotePath)
             }
             if (!pushRes.isSuccess) {
                 onEvent("error", mapOf("message" to "推送失败: ${pushRes.stderr}"))
                 return@withContext false
             }
+            // 回退到 /sdcard 时重定向 ANDROID_DATA，否则 dalvik-cache 不可写导致 dex 加载失败
+            val androidData = if (remotePath.startsWith("/sdcard")) "ANDROID_DATA=/sdcard " else ""
 
             // 2. 启动 scrcpy-server v3.3.4
             onEvent("status", mapOf("msg" to "启动 server..."))
-            val serverCmd = "CLASSPATH=$remotePath app_process ./ com.genymobile.scrcpy.Server 3.3.4 " +
+            val serverCmd = "CLASSPATH=$remotePath ${androidData}app_process ./ com.genymobile.scrcpy.Server 3.3.4 " +
                 "tunnel_forward=true video=true audio=false control=true " +
                 "max_size=$tunedMaxSize video_bit_rate=${tunedBitRate * 1000000} max_fps=$tunedFps " +
                 "send_device_meta=true send_frame_meta=true send_dummy_byte=true send_codec_meta=true " +
@@ -88,13 +101,14 @@ class ScrcpyManager(
             adb.forward("tcp:5005", "localabstract:scrcpy")
 
             // 4. 等待 server socket 就绪
+            //    Android 5.0 无 grep -c，直接读 /proc/net/unix 在本地判断；
+            //    app_process 冷启动 + dex 加载在低端电视上可能超过 6 秒，放宽到约 30s。
             onEvent("status", mapOf("msg" to "等待 server 就绪..."))
             var socketReady = false
-            for (i in 0 until 30) {
-                delay(200)
-                val check = adb.shell("grep -c scrcpy /proc/net/unix 2>/dev/null || echo 0", timeoutMs = 2000)
-                val count = check.stdout.trim().toIntOrNull() ?: 0
-                if (count > 0) { socketReady = true; break }
+            for (i in 0 until 60) {
+                delay(500)
+                val check = adb.shell("cat /proc/net/unix 2>/dev/null", timeoutMs = 3000)
+                if (check.stdout.contains("scrcpy")) { socketReady = true; break }
             }
             if (!socketReady) delay(1000)
 
@@ -104,8 +118,15 @@ class ScrcpyManager(
             val s = ScrcpySession(surfaceTexture) { type, data ->
                 when (type) {
                     "connected" -> {
-                        data["deviceWidth"]?.let { deviceWidth = it as Int }
-                        data["deviceHeight"]?.let { deviceHeight = it as Int }
+                        (data["deviceWidth"] as? Int)?.let { deviceWidth = it }
+                        (data["deviceHeight"] as? Int)?.let { deviceHeight = it }
+                        (data["videoWidth"] as? Int)?.let { videoWidth = it }
+                        (data["videoHeight"] as? Int)?.let { videoHeight = it }
+                    }
+                    "resize" -> {
+                        // 解码器输出格式变化（16 对齐 crop 差异）：仅显示尺寸变化，触摸基准不变
+                        (data["deviceWidth"] as? Int)?.let { deviceWidth = it }
+                        (data["deviceHeight"] as? Int)?.let { deviceHeight = it }
                     }
                     "stopped" -> { connected = false; connecting = false }
                     "error"   -> { connected = false; connecting = false }
@@ -133,12 +154,14 @@ class ScrcpyManager(
         session = null
     }
 
-    // 设备坐标触摸
-    fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int, w: Int, h: Int, pressure: Float = 1f) {
-        session?.sendTouch(action, pointerId, x, y, w, h, pressure)
+    // 设备坐标触摸（w/h 由 ScrcpySession 按服务端握手视频尺寸自动附加：
+    // scrcpy 服务端 PositionMapper 会校验客户端 screenSize 与服务端 videoSize 一致，
+    // 不一致时静默丢弃事件，因此这里绝不能再由上层传入布局尺寸）
+    fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int, pressure: Float = 1f) {
+        session?.sendTouch(action, pointerId, x, y, pressure)
     }
-    fun sendScroll(x: Int, y: Int, w: Int, h: Int, hScroll: Int, vScroll: Int) {
-        session?.sendScroll(x, y, w, h, hScroll, vScroll)
+    fun sendScroll(x: Int, y: Int, hScroll: Int, vScroll: Int) {
+        session?.sendScroll(x, y, hScroll, vScroll)
     }
     fun sendKeycode(action: Int, keycode: Int) {
         session?.sendKeycode(action, keycode)

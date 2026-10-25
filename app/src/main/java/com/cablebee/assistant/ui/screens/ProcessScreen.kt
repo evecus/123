@@ -69,7 +69,7 @@ private fun groupAndSort(raw: List<Pair<String, Long>>): List<ProcInfo> {
         .map { ProcInfo(it.key, it.value) }
 }
 
-/** `ps -A -o RSS,NAME` 的输出：每行 "<rss_kb> <name>" */
+/** `ps -A -o RSS,NAME` 的输出：每行 "<rss_kb> <name>"（Android 6.0+ toybox） */
 private fun parsePs(out: String): List<ProcInfo> {
     val raw = ArrayList<Pair<String, Long>>()
     for (line in out.lineSequence()) {
@@ -81,15 +81,34 @@ private fun parsePs(out: String): List<ProcInfo> {
     return groupAndSort(raw)
 }
 
-/** dumpsys meminfo 兜底命令的输出：每行 "<name> <kb>" */
-private fun parseDumpsys(out: String): List<ProcInfo> {
+/**
+ * Android 5.0/5.1 裸 `ps` 输出（toolbox 不支持 -A/-o）：
+ *   表头：USER PID PPID VSIZE RSS WCHAN PC NAME
+ *   数据：<user> <pid> <ppid> <vsize_kb> <rss_kb> <wchan> <eip> <state> <name>
+ * RSS 列 = rss页数×4（4KB 页），单位已是 KB；NAME 从第 9 列起（可能含空格）。
+ * 表头行 RSS 列非数字，会被 toLongOrNull 自动跳过。
+ */
+private fun parsePsLegacy(out: String): List<ProcInfo> {
     val raw = ArrayList<Pair<String, Long>>()
     for (line in out.lineSequence()) {
         val parts = line.trim().split(Regex("\\s+"))
-        if (parts.size < 2) continue
-        val name = parts[0].replace(Regex("[()]"), "").trim()
-        val kb = parts[1].toLongOrNull() ?: continue
-        if (name == "(pid") continue
+        if (parts.size < 9) continue
+        val kb = parts[4].toLongOrNull() ?: continue
+        val name = parts.subList(8, parts.size).joinToString(" ")
+        raw.add(name to kb)
+    }
+    return groupAndSort(raw)
+}
+
+/** dumpsys meminfo 原始输出中的进程行：`  12345K: com.foo (pid 1234 / activities)` */
+private fun parseDumpsys(out: String): List<ProcInfo> {
+    val regex = Regex("""^\s*([\d,]+)K:\s+(\S+)""")
+    val raw = ArrayList<Pair<String, Long>>()
+    for (line in out.lineSequence()) {
+        val m = regex.find(line) ?: continue
+        val kb = m.groupValues[1].replace(",", "").toLongOrNull() ?: continue
+        val name = m.groupValues[2].replace(Regex("[()]"), "").trim()
+        if (name.isEmpty() || name == "(pid") continue
         raw.add(name to kb)
     }
     return groupAndSort(raw)
@@ -129,31 +148,46 @@ fun ProcessScreen(
                 val server = pkgServer ?: PkgServerService(adbService, context).also { pkgServer = it }
 
                 // 1) 内存概览（shell 已在 IO 线程执行）
-                val memRes = adbService.shell("cat /proc/meminfo | grep -E \"^MemTotal:|^MemAvailable:\"")
+                //    Android 5.0 无 grep -E，直接拉全量 /proc/meminfo 本地解析；
+                //    MemAvailable 自内核 3.14 起才有，缺失时用 MemFree+Buffers+Cached 近似。
+                val memRes = adbService.shell("cat /proc/meminfo 2>/dev/null")
                 var total = 0L
                 var avail = 0L
+                var memFree = 0L
+                var memBuffers = 0L
+                var memCached = 0L
                 for (line in memRes.stdout.split("\n")) {
                     val m = Regex("(\\w+):\\s+(\\d+)").find(line) ?: continue
                     val kb = m.groupValues[2].toLongOrNull() ?: 0L
                     when (m.groupValues[1]) {
                         "MemTotal" -> total = kb
                         "MemAvailable" -> avail = kb
+                        "MemFree" -> memFree = kb
+                        "Buffers" -> memBuffers = kb
+                        "Cached" -> memCached = kb
                     }
                 }
+                if (avail <= 0L) avail = memFree + memBuffers + memCached
                 totalKb = total
                 usedKb = total - avail
 
                 // 2) 进程列表：优先用 ps（几十毫秒）。
                 //    dumpsys meminfo 在部分 ROM（如 ColorOS）上要数秒，还会解冻所有被冻结的进程，只作兜底。
-                val psOut = adbService.shell("ps -A -o RSS,NAME 2>/dev/null | tail -n +2").stdout
-                var list = withContext(Dispatchers.Default) { parsePs(psOut) }
+                //    Android 6.0+ 用 `ps -A -o RSS,NAME`；5.0/5.1 的 toolbox ps 不支持 -A/-o，
+                //    只能用裸 ps（列结构不同，由 parsePsLegacy 解析）。
+                val sdk = adbService.deviceSdkInt()
+                val psOut = if (sdk >= 23) {
+                    adbService.shell("ps -A -o RSS,NAME 2>/dev/null | tail -n +2").stdout
+                } else {
+                    adbService.shell("ps 2>/dev/null").stdout
+                }
+                var list = withContext(Dispatchers.Default) {
+                    if (sdk >= 23) parsePs(psOut) else parsePsLegacy(psOut)
+                }
                 if (list.isEmpty()) {
-                    val dumpOut = adbService.shell(
-                        "dumpsys meminfo 2>/dev/null | grep -E '^\\s+[0-9,]+K:' | " +
-                            "sed 's/,//g; s/K://' | awk '{kb=\$1; pkg=\$2; if(pkg~/\\(/)pkg=\$2; print pkg, kb}' | " +
-                            "sort -rn -k2 | head -80",
-                        timeoutMs = 30_000
-                    ).stdout
+                    // 兜底：dumpsys meminfo 全量拉取后本地解析
+                    // （5.0 无 grep/sed/awk/sort/head，无法在设备侧做管道过滤）
+                    val dumpOut = adbService.shell("dumpsys meminfo 2>/dev/null", timeoutMs = 30_000).stdout
                     list = withContext(Dispatchers.Default) { parseDumpsys(dumpOut) }
                 }
                 procs = list

@@ -168,7 +168,7 @@ fun AppsScreen(
             val sortBy = if (sortMode == AppsSortMode.PackageName) "package" else "label"
             var batch = 0
             try {
-                pkgServer.streamPackages(sortBy).collect { pkg ->
+                pkgServer.streamAllPackages(sortBy).collect { pkg ->
                     val ex = AppInfoEx(
                         pkg = pkg,
                         isDisabled = !pkg.enabled,

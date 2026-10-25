@@ -71,9 +71,15 @@ fun RemoteScreen(
     var statusMsg by remember { mutableStateOf<String?>(null) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
-    // 设备尺寸（握手 / 输出格式变化时更新，用于镜像视图排版）
+    // 设备显示尺寸（crop 后真实尺寸，握手 / 输出格式变化时更新，用于镜像视图排版）
     var devW by remember { mutableIntStateOf(scrcpyManager.deviceWidth) }
     var devH by remember { mutableIntStateOf(scrcpyManager.deviceHeight) }
+
+    // 服务端视频编码尺寸（握手 codecMeta，round8 后）：触摸坐标映射的唯一基准。
+    // scrcpy 服务端 PositionMapper 会校验触摸事件中的 screenSize 与该尺寸一致，
+    // 不一致时静默丢弃事件，因此不能用布局尺寸（devW/devH）替代。
+    var videoW by remember { mutableIntStateOf(scrcpyManager.videoWidth) }
+    var videoH by remember { mutableIntStateOf(scrcpyManager.videoHeight) }
 
     // 镜像视图状态：显示镜像页时才创建用于解码的 TextureView
     var showMirror by remember { mutableStateOf(false) }
@@ -164,10 +170,18 @@ fun RemoteScreen(
                         "connected" -> {
                             (data["deviceWidth"] as? Int)?.let { devW = it }
                             (data["deviceHeight"] as? Int)?.let { devH = it }
+                            (data["videoWidth"] as? Int)?.let { videoW = it }
+                            (data["videoHeight"] as? Int)?.let { videoH = it }
                             connected = true
                             connecting = false
                             statusMsg = null
                             errorMsg = null
+                        }
+                        "resize" -> {
+                            // 解码器输出格式变化（16 对齐 crop 差异）：仅显示尺寸变化，
+                            // 触摸基准（videoW/videoH）保持不变，无需重连
+                            (data["deviceWidth"] as? Int)?.let { devW = it }
+                            (data["deviceHeight"] as? Int)?.let { devH = it }
                         }
                         "error" -> {
                             val msg = data["message"] as? String ?: "未知错误"
@@ -265,6 +279,8 @@ fun RemoteScreen(
             scrcpyManager = scrcpyManager,
             devW = devW,
             devH = devH,
+            videoW = videoW,
+            videoH = videoH,
             connected = connected,
             connecting = connecting,
             statusMsg = statusMsg,
@@ -485,6 +501,8 @@ private fun MirrorView(
     scrcpyManager: ScrcpyManager,
     devW: Int,
     devH: Int,
+    videoW: Int,
+    videoH: Int,
     connected: Boolean,
     connecting: Boolean,
     statusMsg: String?,
@@ -522,11 +540,13 @@ private fun MirrorView(
                 MirroredTexture(
                     devW = devW,
                     devH = devH,
+                    videoW = videoW,
+                    videoH = videoH,
                     shouldRotate = shouldRotate,
                     onTextureViewReady = onTextureViewReady,
                     onTextureViewDestroyed = onTextureViewDestroyed,
                     onTouch = { action, pointerId, x, y, pressure ->
-                        scrcpyManager.sendTouch(action, pointerId, x, y, devW, devH, pressure)
+                        scrcpyManager.sendTouch(action, pointerId, x, y, pressure)
                     }
                 )
 
@@ -581,6 +601,8 @@ private fun MirrorView(
 private fun MirroredTexture(
     devW: Int,
     devH: Int,
+    videoW: Int,
+    videoH: Int,
     shouldRotate: Boolean,
     onTextureViewReady: (TextureView) -> Unit,
     onTextureViewDestroyed: () -> Unit,
@@ -607,12 +629,12 @@ private fun MirroredTexture(
             }
         }
 
-        if (areaW <= 0f || areaH <= 0f || devW <= 0 || devH <= 0) {
+        if (areaW <= 0f || areaH <= 0f || devW <= 0 || devH <= 0 || videoW <= 0 || videoH <= 0) {
             // 设备尺寸未知（尚未握手）：先铺满占位
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(devW, devH, shouldRotate) {
+                    .pointerInput(videoW, videoH, shouldRotate) {
                         awaitPointerEventScope {
                             while (true) {
                                 val event = awaitPointerEvent()
@@ -620,17 +642,17 @@ private fun MirroredTexture(
                                 if (renderSize.width <= 0f || renderSize.height <= 0f) continue
                                 when (event.type) {
                                     PointerEventType.Press -> event.changes.forEach { change ->
-                                        val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                        val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                         onTouch(ACTION_DOWN, change.id.value, dev.x.toInt(), dev.y.toInt(), change.pressure)
                                         change.consume()
                                     }
                                     PointerEventType.Move -> event.changes.forEach { change ->
-                                        val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                        val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                         onTouch(ACTION_MOVE, change.id.value, dev.x.toInt(), dev.y.toInt(), change.pressure)
                                         change.consume()
                                     }
                                     PointerEventType.Release -> event.changes.forEach { change ->
-                                        val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                        val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                         onTouch(ACTION_UP, change.id.value, dev.x.toInt(), dev.y.toInt(), 0f)
                                         change.consume()
                                     }
@@ -669,7 +691,7 @@ private fun MirroredTexture(
         Box(
             modifier = Modifier
                 .size(visualW, visualH)
-                .pointerInput(devW, devH, shouldRotate) {
+                .pointerInput(videoW, videoH, shouldRotate) {
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent()
@@ -677,17 +699,17 @@ private fun MirroredTexture(
                             if (renderSize.width <= 0f || renderSize.height <= 0f) continue
                             when (event.type) {
                                 PointerEventType.Press -> event.changes.forEach { change ->
-                                    val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                    val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                     onTouch(ACTION_DOWN, change.id.value, dev.x.toInt(), dev.y.toInt(), change.pressure)
                                     change.consume()
                                 }
                                 PointerEventType.Move -> event.changes.forEach { change ->
-                                    val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                    val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                     onTouch(ACTION_MOVE, change.id.value, dev.x.toInt(), dev.y.toInt(), change.pressure)
                                     change.consume()
                                 }
                                 PointerEventType.Release -> event.changes.forEach { change ->
-                                    val dev = toDeviceCoords(change.position, renderSize, devW, devH, shouldRotate)
+                                    val dev = toDeviceCoords(change.position, renderSize, videoW, videoH, shouldRotate)
                                     onTouch(ACTION_UP, change.id.value, dev.x.toInt(), dev.y.toInt(), 0f)
                                     change.consume()
                                 }
@@ -717,7 +739,11 @@ private fun MirroredTexture(
     }
 }
 
-/** 渲染坐标 → 设备坐标（与 Flutter _toDev 完全一致） */
+/**
+ * 渲染坐标 → 设备坐标（与 Flutter _toDev 完全一致）。
+ * 注意目标尺寸是服务端视频编码尺寸（握手 codecMeta，round8 后），不是显示尺寸：
+ * scrcpy 服务端 PositionMapper 以此校验并映射到真实屏幕。
+ */
 private fun toDeviceCoords(
     local: Offset,
     renderSize: Size,

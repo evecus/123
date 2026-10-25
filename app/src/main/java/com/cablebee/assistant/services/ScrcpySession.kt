@@ -62,6 +62,15 @@ class ScrcpySession(
     var deviceWidth:  Int = 0; private set
     var deviceHeight: Int = 0; private set
 
+    /**
+     * 服务端视频编码尺寸（握手 codecMeta，round8 后，如 1088x1920）。
+     * scrcpy 服务端 PositionMapper.map() 会严格校验触摸/滚轮事件中的 screenSize 与该尺寸
+     * 相等（`videoSize.equals(clientVideoSize)`），不等时返回 null 静默丢弃事件。
+     * 因此触摸事件的 w/h 必须始终取该值，不能用解码器 crop 后的显示尺寸覆盖。
+     */
+    @Volatile var videoWidth:  Int = 0; private set
+    @Volatile var videoHeight: Int = 0; private set
+
     // ── 连接（push/forward/server 已由调用方完成）────────────────────────────
 
     fun connect() {
@@ -119,10 +128,14 @@ class ScrcpySession(
 
         deviceWidth  = w
         deviceHeight = h
+        videoWidth   = w
+        videoHeight  = h
         onEvent("connected", mapOf(
             "deviceName"   to deviceName,
             "deviceWidth"  to deviceWidth,
             "deviceHeight" to deviceHeight,
+            "videoWidth"   to videoWidth,
+            "videoHeight"  to videoHeight,
         ))
 
         initDecoder()
@@ -195,21 +208,39 @@ class ScrcpySession(
                                 outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                                     val of = c.outputFormat
                                     Log.i(TAG, "output format changed: $of")
-                                    // 解码器输出宽高可能是按 16 对齐的（如 1280 对 1272），需用裁剪框得到真实视频尺寸，
-                                    // 否则显示比例与触摸坐标映射会有偏差
-                                    var outW = of.getInteger(MediaFormat.KEY_WIDTH)
-                                    var outH = of.getInteger(MediaFormat.KEY_HEIGHT)
+                                    // 解码器输出宽高可能是按 16 对齐的 coded 尺寸（如 1088 对 1080），
+                                    // 需用裁剪框得到真实显示尺寸用于渲染 buffer。
+                                    // 注意：触摸基准（videoWidth/videoHeight）绝不能改用 crop 后尺寸——
+                                    // 服务端 PositionMapper 校验的是握手 codecMeta（coded）尺寸。
+                                    val codedW = of.getInteger(MediaFormat.KEY_WIDTH)
+                                    val codedH = of.getInteger(MediaFormat.KEY_HEIGHT)
+                                    var cropW = codedW
+                                    var cropH = codedH
                                     if (of.containsKey("crop-left") && of.containsKey("crop-right") &&
                                         of.containsKey("crop-top") && of.containsKey("crop-bottom")) {
-                                        outW = of.getInteger("crop-right") - of.getInteger("crop-left") + 1
-                                        outH = of.getInteger("crop-bottom") - of.getInteger("crop-top") + 1
+                                        cropW = of.getInteger("crop-right") - of.getInteger("crop-left") + 1
+                                        cropH = of.getInteger("crop-bottom") - of.getInteger("crop-top") + 1
                                     }
-                                    if (outW > 0 && outH > 0) {
-                                        surfaceTexture.setDefaultBufferSize(outW, outH)
+                                    if (cropW > 0 && cropH > 0) {
+                                        surfaceTexture.setDefaultBufferSize(cropW, cropH)
+                                    }
+                                    if (codedW > 0 && codedH > 0 && (codedW != videoWidth || codedH != videoHeight)) {
+                                        // coded 尺寸发生变化：设备旋转/重新协商，服务端 videoSize 已改变，
+                                        // 触摸基准必须同步更新为新 coded 尺寸，否则事件会被服务端丢弃。
+                                        videoWidth  = codedW
+                                        videoHeight = codedH
                                         onEvent("connected", mapOf(
                                             "deviceName"   to "scrcpy",
-                                            "deviceWidth"  to outW,
-                                            "deviceHeight" to outH,
+                                            "deviceWidth"  to if (cropW > 0) cropW else codedW,
+                                            "deviceHeight" to if (cropH > 0) cropH else codedH,
+                                            "videoWidth"   to videoWidth,
+                                            "videoHeight"  to videoHeight,
+                                        ))
+                                    } else if (cropW > 0 && cropH > 0) {
+                                        // 仅 crop 差异（16 对齐填充）：显示比例微调，触摸基准不变
+                                        onEvent("resize", mapOf(
+                                            "deviceWidth"  to cropW,
+                                            "deviceHeight" to cropH,
                                         ))
                                     }
                                 }
@@ -235,8 +266,18 @@ class ScrcpySession(
 
     // ── 控制 ─────────────────────────────────────────────────────────────────
 
-    fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int,
-                  w: Int, h: Int, pressure: Float = 1f) {
+    /**
+     * 发送触摸事件。x/y 为服务端视频坐标系（握手 codecMeta 尺寸）下的坐标；
+     * w/h 固定取握手 codecMeta 尺寸（videoWidth/videoHeight），
+     * 服务端 PositionMapper 会校验其与服务端 videoSize 一致，否则丢弃事件。
+     */
+    fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int, pressure: Float = 1f) {
+        val w = videoWidth
+        val h = videoHeight
+        if (w <= 0 || h <= 0) {
+            Log.w(TAG, "sendTouch: video size not ready (${w}x${h}), dropping event")
+            return
+        }
         val buf = ByteBuffer.allocate(32).order(ByteOrder.BIG_ENDIAN)
         buf.put(TYPE_INJECT_TOUCH.toByte())
         buf.put(action.toByte())
@@ -250,7 +291,13 @@ class ScrcpySession(
         sendControl(buf.array())
     }
 
-    fun sendScroll(x: Int, y: Int, w: Int, h: Int, hScroll: Int, vScroll: Int) {
+    fun sendScroll(x: Int, y: Int, hScroll: Int, vScroll: Int) {
+        val w = videoWidth
+        val h = videoHeight
+        if (w <= 0 || h <= 0) {
+            Log.w(TAG, "sendScroll: video size not ready (${w}x${h}), dropping event")
+            return
+        }
         val buf = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN)
         buf.put(TYPE_INJECT_SCROLL.toByte())
         buf.putInt(x); buf.putInt(y)

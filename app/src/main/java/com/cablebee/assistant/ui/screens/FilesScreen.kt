@@ -1060,17 +1060,14 @@ private fun FileEditorOverlay(
     fun save() {
         scope.launch {
             saving = true
-            val encoded = android.util.Base64.encodeToString(
-                text.toByteArray(Charsets.UTF_8),
-                android.util.Base64.NO_WRAP
-            )
-            val res = adbService.shell("echo \"$encoded\" | base64 -d > \"$remotePath\" 2>&1")
+            // Android 5.0 无 base64 工具，echo|base64 -d 方案不可用，统一走 push
+            val res = adbService.writeTextFile(remotePath, text)
             saving = false
             // 简单反馈：成功时退出，失败时保留并标记
             if (res.exitCode == 0) {
                 onBack()
             } else {
-                error = "保存失败: ${res.stderr}"
+                error = "保存失败: ${res.stderr.ifEmpty { res.stdout }}"
             }
         }
     }

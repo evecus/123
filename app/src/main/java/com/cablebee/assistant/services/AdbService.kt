@@ -272,10 +272,47 @@ class AdbService {
         else AdbCommandResult(1, "", r.output)
     }
 
+    /**
+     * 把文本内容写入被连接设备的文件。
+     * Android 5.0 无 base64 工具，`echo ... | base64 -d > file` 方案不可用，
+     * 统一走「本地临时文件 + adb push」实现。
+     */
+    suspend fun writeTextFile(remotePath: String, content: String): AdbCommandResult {
+        if (!hasDevice) return AdbCommandResult(-1, "", "No device selected")
+        return try {
+            val cacheDir = BinaryManager.getCacheDir() ?: return AdbCommandResult(1, "", "no cache dir")
+            val tmpFile = File(cacheDir, "cablebee_write_tmp")
+            tmpFile.writeText(content, Charsets.UTF_8)
+            push(tmpFile.absolutePath, remotePath)
+        } catch (e: Exception) {
+            AdbCommandResult(1, "", e.toString())
+        }
+    }
+
+    // ── 设备能力探测 ──────────────────────────────────────────────────────────
+
+    private var cachedSdkInt: Int? = null
+
+    /**
+     * 被连接设备的 SDK 版本（结果缓存）。
+     * Android 5.0/5.1 = 21/22 只有 toolbox：无 awk/sed/sort/head/tail/wc/base64/unzip，
+     * `ls` 不支持 `-L` 且长列表无 links 列，`ps` 不支持 `-A -o`。
+     */
+    suspend fun deviceSdkInt(): Int {
+        cachedSdkInt?.let { return it }
+        val res = shell("getprop ro.build.version.sdk")
+        val sdk = res.stdout.trim().toIntOrNull() ?: 23 // 探测失败按现代版本处理
+        cachedSdkInt = sdk
+        return sdk
+    }
+
     // ── 文件列表 ──────────────────────────────────────────────────────────────
 
     suspend fun listFiles(path: String): List<FileEntry> {
-        val result = shell("ls -laL \"$path\" 2>&1")
+        // Android 5.0/5.1 的 toolbox ls 不支持 -L（遇到未知选项会直接报错退出），
+        // 其长列表输出也无 links 列（由 FileEntry.parseLsLine 以日期字段为锚点兼容）。
+        val cmd = if (deviceSdkInt() >= 23) "ls -laL \"$path\" 2>&1" else "ls -la \"$path\" 2>&1"
+        val result = shell(cmd)
         return result.stdout.split("\n")
             .mapNotNull { FileEntry.parseLsLine(it) }
     }
@@ -298,43 +335,6 @@ class AdbService {
             }
     }
 
-    suspend fun loadAppIcon(apkPath: String): ByteArray? {
-        if (!hasDevice) return null
-        return try {
-            val listRes = shell("unzip -l \"$apkPath\" \"*.png\" 2>/dev/null")
-            if (!listRes.isSuccess && listRes.stdout.isEmpty()) return null
-
-            val lines = listRes.stdout.split("\n")
-            val candidates = lines
-                .map { it.trim().split(Regex("\\s+")).lastOrNull() ?: "" }
-                .filter { f ->
-                    f.endsWith(".png") &&
-                    (f.contains("mipmap") || f.contains("drawable")) &&
-                    (f.contains("ic_launcher") || f.contains("icon"))
-                }
-
-            fun rank(f: String): Int = when {
-                f.contains("xxxhdpi") -> 0
-                f.contains("xxhdpi") -> 1
-                f.contains("xhdpi") -> 2
-                f.contains("hdpi") -> 3
-                f.contains("mdpi") -> 4
-                else -> 5
-            }
-            val sorted = candidates.sortedBy { rank(it) }
-
-            val target = sorted.firstOrNull() ?: lines
-                .map { it.trim().split(Regex("\\s+")).lastOrNull() ?: "" }
-                .filter { it.endsWith(".png") && (it.contains("mipmap") || it.contains("drawable")) }
-                .firstOrNull() ?: return null
-
-            val b64Res = shell("unzip -p \"$apkPath\" \"$target\" 2>/dev/null | base64 2>/dev/null")
-            if (!b64Res.isSuccess || b64Res.stdout.trim().isEmpty()) return null
-
-            android.util.Base64.decode(b64Res.stdout.trim().replace("\n", ""), android.util.Base64.DEFAULT)
-        } catch (_: Exception) { null }
-    }
-
     suspend fun installApk(localPath: String) = shell("pm install -r \"$localPath\"")
     suspend fun uninstall(pkg: String) = shell("pm uninstall $pkg")
     suspend fun forceStop(pkg: String) = shell("am force-stop $pkg")
@@ -350,11 +350,11 @@ class AdbService {
             "getprop ro.product.manufacturer; echo \"$sep\";" +
             "getprop ro.board.platform; echo \"$sep\";" +
             "getprop ro.product.cpu.abi; echo \"$sep\";" +
-            "cat /proc/cpuinfo | grep \"^processor\" | wc -l; echo \"$sep\";" +
+            "cat /proc/cpuinfo; echo \"$sep\";" +
             "wm size; echo \"$sep\";" +
             "wm density; echo \"$sep\";" +
             "cat /proc/meminfo | grep MemTotal; echo \"$sep\";" +
-            "df /data | tail -1; echo \"$sep\";" +
+            "df /data; echo \"$sep\";" +
             "dumpsys battery | grep level; echo \"$sep\";" +
             "dumpsys battery | grep voltage; echo \"$sep\";" +
             "dumpsys battery | grep temperature; echo \"$sep\";" +
@@ -362,9 +362,9 @@ class AdbService {
             "getprop ro.build.version.release; echo \"$sep\";" +
             "getprop ro.build.version.sdk; echo \"$sep\";" +
             "getprop ro.build.version.security_patch; echo \"$sep\";" +
-            "uname -r; echo \"$sep\";" +
+            "cat /proc/version; echo \"$sep\";" +
             "getprop ro.serialno; echo \"$sep\";" +
-            "ip addr show wlan0 | grep \"inet \"; echo \"$sep\";" +
+            "ip addr show wlan0 2>/dev/null || ifconfig wlan0 2>/dev/null; echo \"$sep\";" +
             "cat /sys/class/net/wlan0/address; echo \"$sep\";" +
             "settings get secure android_id"
         )
@@ -388,7 +388,9 @@ class AdbService {
 
         var storageTotal = "无"
         var storageFree = "无"
-        val dfParts = at(9).trim().split(Regex("\\s+"))
+        // df /data 全量输出，本地取最后一行（Android 5.0 无 tail）
+        val dfLine = at(9).lines().lastOrNull { it.isNotBlank() }?.trim() ?: ""
+        val dfParts = dfLine.split(Regex("\\s+"))
         if (dfParts.size >= 4) {
             fun parseK(s: String): Int? = s.replace(Regex("[^\\d]"), "").toIntOrNull()
             val total = parseK(dfParts[1])
@@ -417,18 +419,21 @@ class AdbService {
         }
 
         var ipAddr = "无"
-        val ipMatch = Regex("""inet\s+([\d.]+)""").find(at(19))
+        // 兼容 `ip addr`（inet 192.168.1.5/24）与 5.0 ifconfig（inet addr:192.168.1.5）
+        val ipMatch = Regex("""inet\s+(?:addr[:\s]+)?(\d+\.\d+\.\d+\.\d+)""").find(at(19))
         if (ipMatch != null) ipAddr = ipMatch.groupValues[1]
 
         var mac = at(20).trim()
         if (mac.isEmpty() || mac.contains("Permission") || mac == "02:00:00:00:00:00") mac = "无"
 
-        var cores = at(5).trim()
-        if (cores.isEmpty() || cores == "0") {
-            val np = shell("nproc")
-            cores = np.stdout.trim()
-        }
+        // CPU 核数：本地数 /proc/cpuinfo 的 processor 行（Android 5.0 无 wc/nproc）
+        var cores = at(5).lines().count { it.startsWith("processor") }.toString()
         if (cores.isNotEmpty() && cores != "0") cores = "$cores 核"
+
+        // 内核版本：从 /proc/version 提取（Android 5.0 无 uname）
+        var kernel = "无"
+        val kernelMatch = Regex("""Linux version (\S+)""").find(at(17))
+        if (kernelMatch != null) kernel = kernelMatch.groupValues[1]
 
         return mapOf(
             "model" to (if (at(0).isEmpty()) "无" else at(0)),
@@ -448,7 +453,7 @@ class AdbService {
             "android" to (if (at(14).isEmpty()) "无" else at(14)),
             "sdk" to (if (at(15).isEmpty()) "无" else at(15)),
             "security_patch" to (if (at(16).isEmpty()) "无" else at(16)),
-            "kernel" to (if (at(17).isEmpty()) "无" else at(17)),
+            "kernel" to kernel,
             "serial" to (if (at(18).isEmpty()) "无" else at(18)),
             "ip" to ipAddr,
             "mac" to mac,

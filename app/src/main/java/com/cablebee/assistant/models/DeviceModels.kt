@@ -132,21 +132,38 @@ data class FileEntry(
     val date: String
 ) {
     companion object {
+        private val DATE_FIELD = Regex("""^\d{4}-\d{2}-\d{2}$""")
+
+        /**
+         * 解析 `ls -l` 输出的一行。以 YYYY-MM-DD 日期字段为锚点，兼容两种格式：
+         *  - 现代 toybox（Android 6.0+）：`perms links user group size date time name`（8+ 字段）
+         *  - Android 5.0 toolbox：`perms user group size date time name`（7 字段，无 links 列）
+         *  - Android 5.0 符号链接/目录行：size 列整体缺失，`perms user group date time name`
+         */
         fun parseLsLine(line: String): FileEntry? {
             val parts = line.trim().split(Regex("\\s+"))
-            if (parts.size < 8) return null
+            if (parts.size < 6) return null
             val perms = parts[0]
-            if (!perms.startsWith("-") && !perms.startsWith("d") && !perms.startsWith("l")) return null
-            val rawName = parts.subList(7, parts.size).joinToString(" ")
+            if (perms.length < 10) return null
+            if (!perms.startsWith("-") && !perms.startsWith("d") && !perms.startsWith("l") &&
+                !perms.startsWith("b") && !perms.startsWith("c") &&
+                !perms.startsWith("p") && !perms.startsWith("s")) return null
+            val dateIdx = parts.indexOfFirst { DATE_FIELD.matches(it) }
+            if (dateIdx < 2) return null
+            // size 列：现代格式在 date 前一字段；5.0 链接/目录行该位置是 user/group，按 0 处理
+            val size = parts.getOrNull(dateIdx - 1)?.toLongOrNull() ?: 0L
+            val nameStart = dateIdx + 2 // 跳过 date 与 time 两列
+            if (nameStart >= parts.size) return null
+            val rawName = parts.subList(nameStart, parts.size).joinToString(" ")
             val arrowIdx = rawName.indexOf(" -> ")
             val name = if (arrowIdx >= 0) rawName.substring(0, arrowIdx) else rawName
-            if (name == "." || name == "..") return null
+            if (name == "." || name == ".." || name.isEmpty()) return null
             val isDir = perms.startsWith("d") || perms.startsWith("l")
             return FileEntry(
                 permissions = perms,
                 isDirectory = isDir,
-                size = parts[4],
-                date = "${parts[5]} ${parts[6]}",
+                size = size.toString(),
+                date = "${parts[dateIdx]} ${parts[dateIdx + 1]}",
                 name = name
             )
         }
