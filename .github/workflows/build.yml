@@ -61,3 +61,13 @@ jobs:
           name: CableBee-release-arm64-v8a
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+      
+      - run: |
+          mkdir -p out
+          mv app/build/outputs/apk/release/*.apk out/CableBee.apk
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test
+          files: out/CableBee.apk
