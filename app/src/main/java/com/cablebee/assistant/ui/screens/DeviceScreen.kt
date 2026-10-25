@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cablebee.assistant.models.AdbDevice
 import com.cablebee.assistant.services.AdbService
+import com.cablebee.assistant.services.NetAddress
 import com.cablebee.assistant.services.ScrcpyManager
 import com.cablebee.assistant.services.PkgServerService
 import com.cablebee.assistant.ui.components.RailWidth
@@ -122,9 +123,8 @@ fun DeviceScreen(
                     disconnectHandled = false
                     scope.launch {
                         if (device.isWifi) {
-                            val parts = device.serial.split(":")
-                            val host = parts[0]
-                            val port = if (parts.size > 1) parts[1].toIntOrNull() ?: 5555 else 5555
+                            val (host, port) = NetAddress.parse(device.serial)
+                                ?: (device.serial to NetAddress.DEFAULT_ADB_PORT)
                             adbService.connect(host, port)
                             adbService.selectDevice(device)
                         } else {

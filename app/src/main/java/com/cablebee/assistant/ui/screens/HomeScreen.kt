@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cablebee.assistant.models.AdbDevice
 import com.cablebee.assistant.services.AdbService
+import com.cablebee.assistant.services.NetAddress
 import com.cablebee.assistant.services.SelfPairManager
 import com.cablebee.assistant.ui.components.PageBody
 import com.cablebee.assistant.ui.theme.*
@@ -107,19 +108,21 @@ fun HomeScreen(
     fun connect(overrideIp: String? = null) {
         val raw = (overrideIp ?: ipText).trim()
         if (raw.isEmpty()) return
-        val (host, port) = if (raw.contains(":")) {
-            val parts = raw.split(":")
-            parts[0] to (parts.getOrNull(1)?.toIntOrNull() ?: 5555)
-        } else raw to 5555
+        // 支持 IPv4 / 域名 / IPv6（[2001:db8::1]:5555 或不带端口的 2001:db8::1）
+        val (host, port) = NetAddress.parse(raw) ?: run {
+            connectMsg = "地址格式不正确（IPv6 带端口请写成 [地址]:端口）"
+            return
+        }
+        val target = NetAddress.format(host, port)
         scope.launch {
             connecting = true
             connectMsg = null
-            connectingIp = "$host:$port"
+            connectingIp = target
             val result = adbService.connect(host, port)
             connecting = false
             connectingIp = null
             if (result.isSuccess) {
-                saveHistory("$host:$port")
+                saveHistory(target)
                 adbService.refreshDevices()
             } else {
                 connectMsg = result.stderr
@@ -255,7 +258,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
                         Text(
-                            "输入设备 IP（默认端口 5555）",
+                            "输入设备 IP（默认端口 5555，支持 IPv6）",
                             fontSize = 13.sp,
                             color = TextMuted,
                             fontFamily = JetBrainsMono
@@ -282,7 +285,8 @@ fun HomeScreen(
                         }
                     },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    // 数字键盘没有 ":"、"a-f"、"[ ]"，无法输入 IPv6，改用 URI 键盘
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     keyboardActions = KeyboardActions(onDone = { connect() }),
                     shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -897,7 +901,7 @@ private fun PairDialog(
                     value = addr,
                     onValueChange = { addr = it },
                     label = { Text("IP 地址和端口") },
-                    placeholder = { Text("10.0.0.6:43251", fontSize = 12.sp) },
+                    placeholder = { Text("10.0.0.6:43251 或 [fe80::1]:43251", fontSize = 12.sp) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth()
@@ -937,16 +941,9 @@ private fun PairDialog(
             Button(
                 onClick = {
                     if (code.isBlank() || addr.isBlank()) return@Button
-                    val colonIdx = addr.lastIndexOf(":")
-                    if (colonIdx < 0) {
-                        result = "请输入正确格式：IP地址:端口"
-                        success = false
-                        return@Button
-                    }
-                    val host = addr.substring(0, colonIdx).trim()
-                    val port = addr.substring(colonIdx + 1).trim().toIntOrNull() ?: 0
-                    if (host.isEmpty() || port == 0) {
-                        result = "请输入正确格式：IP地址:端口"
+                    // 配对必须带端口；IPv6 请写成 [地址]:端口
+                    val (host, port) = NetAddress.parse(addr, defaultPort = null) ?: run {
+                        result = "请输入正确格式：IP地址:端口（IPv6：[地址]:端口）"
                         success = false
                         return@Button
                     }
