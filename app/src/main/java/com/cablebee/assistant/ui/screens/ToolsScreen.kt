@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.cablebee.assistant.services.AdbService
+import com.cablebee.assistant.ui.components.FloatingToast
 import com.cablebee.assistant.ui.components.WidePageBody
 import com.cablebee.assistant.ui.theme.*
 import kotlinx.coroutines.launch
@@ -237,25 +238,14 @@ fun ToolsScreen(
     // ── UI ──
 
     // WidePageBody：平板限制 1200dp 居中（对应 Flutter WidePageBody）
+    Box(modifier = Modifier.fillMaxSize()) {
     WidePageBody(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 40.dp)
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 40.dp)
         ) {
-        // 结果提示条
-        if (resultMsg != null) {
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                ResultBar(
-                    message = resultMsg!!,
-                    ok = resultOk,
-                    onDismiss = { resultMsg = null }
-                )
-            }
-        }
-
         // ════ 截图 ════
-        item { Spacer(modifier = Modifier.height(16.dp)) }
+        item { Spacer(modifier = Modifier.height(8.dp)) }
         item {
             ToolGroup(title = "截图", icon = Icons.Rounded.ScreenshotMonitor, iconColor = Primary) {
                 ToolTile(
@@ -342,6 +332,17 @@ fun ToolsScreen(
         }
     }
 
+    FloatingToast(
+        message = resultMsg,
+        ok = resultOk,
+        onDismiss = { resultMsg = null },
+        modifier = Modifier
+            .align(Alignment.TopCenter)
+            .statusBarsPadding()
+            .padding(top = 8.dp)
+    )
+    } // Box
+
     // ── Dialogs ──
 
     confirmData?.let { data ->
@@ -379,43 +380,6 @@ fun ToolsScreen(
         NtpDialog(
             onSet = { server -> setNtp(server); showNtpDialog = false },
             onDismiss = { showNtpDialog = false }
-        )
-    }
-}
-
-// ── 结果提示条 ───────────────────────────────────────────────────────────────
-
-@Composable
-private fun ResultBar(message: String, ok: Boolean, onDismiss: () -> Unit) {
-    val color = if (ok) Success else Danger
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = 0.08f))
-            .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            if (ok) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline,
-            contentDescription = null,
-            tint = color,
-            modifier = Modifier.size(15.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            message,
-            modifier = Modifier.weight(1f),
-            fontFamily = JetBrainsMono,
-            fontSize = 11.sp,
-            color = color
-        )
-        Icon(
-            Icons.Rounded.Close,
-            contentDescription = "关闭",
-            tint = color.copy(alpha = 0.6f),
-            modifier = Modifier.size(14.dp).clickable(onClick = onDismiss)
         )
     }
 }

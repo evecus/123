@@ -35,8 +35,10 @@ import com.cablebee.assistant.models.FileEntry
 import com.cablebee.assistant.services.AdbService
 import com.cablebee.assistant.ui.components.CbeeLoader
 import com.cablebee.assistant.ui.components.EmptyState
+import com.cablebee.assistant.ui.components.FloatingToast
 import com.cablebee.assistant.ui.components.LocalFilePickerSheet
 import com.cablebee.assistant.ui.components.WidePageBody
+import com.cablebee.assistant.ui.components.toastIsOk
 import com.cablebee.assistant.ui.theme.*
 import kotlinx.coroutines.launch
 import java.io.File
@@ -280,15 +282,6 @@ fun FilesScreen(
                         }
                     )
                 Divider(color = Bg3, thickness = 1.dp)
-
-                // 传输状态条
-                if (transferMessage != null) {
-                    TransferBar(
-                        transferring = transferring,
-                        message = transferMessage!!,
-                        onClose = { transferMessage = null }
-                    )
-                }
 
                 // 文件列表
                 if (loading) {
@@ -549,6 +542,17 @@ fun FilesScreen(
                 allowFolders = false
             )
         }
+
+        // 顶部悬浮提示（上传/下载结果等），3 秒自动消失
+        FloatingToast(
+            message = transferMessage,
+            ok = transferMessage?.let { toastIsOk(it) } ?: true,
+            onDismiss = { transferMessage = null },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 8.dp)
+        )
     }
 }
 
@@ -743,55 +747,6 @@ private fun MenuRow(icon: ImageVector, label: String, iconColor: Color) {
             fontSize = 13.sp,
             color = TextPrimary
         )
-    }
-}
-
-// ── 传输状态条 ────────────────────────────────────────────────────────────────
-@Composable
-private fun TransferBar(transferring: Boolean, message: String, onClose: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 0.dp)
-            .padding(top = 8.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(Bg1)
-            .border(1.dp, Bg3, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (transferring) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(12.dp),
-                strokeWidth = 1.5.dp,
-                color = Primary
-            )
-        } else {
-            Icon(
-                if (message.startsWith("✓")) Icons.Rounded.CheckCircleOutline else Icons.Rounded.ErrorOutline,
-                contentDescription = null,
-                tint = if (message.startsWith("✓")) Success else Danger,
-                modifier = Modifier.size(14.dp)
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            message,
-            modifier = Modifier.weight(1f),
-            fontFamily = JetBrainsMono,
-            fontSize = 11.sp,
-            color = TextSecondary
-        )
-        if (!transferring) {
-            Icon(
-                Icons.Rounded.Close,
-                contentDescription = "关闭",
-                tint = TextMuted,
-                modifier = Modifier
-                    .size(14.dp)
-                    .clickable(onClick = onClose)
-            )
-        }
     }
 }
 

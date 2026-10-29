@@ -462,8 +462,8 @@ fun LocalFilePickerSheet(
         onDismissRequest = onDismiss,
         containerColor = Bg0,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        // 只保留系统自带的一条拖动手柄，去掉内容区自定义把手，避免顶部双条 + 大片空白
-        dragHandle = { BottomSheetDefaults.DragHandle() },
+        // 不显示拖动手柄，去掉顶部小白条和多余空白
+        dragHandle = null,
         windowInsets = WindowInsets(0, 0, 0, 0),
         modifier = if (configuration.screenWidthDp >= 600) {
             // 平板上限制弹窗宽度并居中（对应 Flutter ConstrainedBox maxWidth 560）

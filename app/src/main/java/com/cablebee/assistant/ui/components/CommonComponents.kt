@@ -526,3 +526,59 @@ fun CbeeSnackbarHost(
         )
     }
 }
+
+/**
+ * 顶部悬浮提示：不插入页面内容流，无关闭按钮，[durationMs] 后自动消失。
+ * 请放在页面最外层 Box 内，用 Alignment.TopCenter。
+ */
+@Composable
+fun FloatingToast(
+    message: String?,
+    ok: Boolean = true,
+    durationMs: Long = 3000L,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (message.isNullOrBlank()) return
+
+    LaunchedEffect(message) {
+        kotlinx.coroutines.delay(durationMs)
+        onDismiss()
+    }
+
+    val color = if (ok) Success else Danger
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            message,
+            modifier = Modifier.weight(1f),
+            fontFamily = JetBrainsMono,
+            fontSize = 12.sp,
+            color = color,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** 根据文案粗略判断成功/失败（含 ✓✗ 或「失败」关键字） */
+fun toastIsOk(message: String): Boolean {
+    if (message.startsWith("✗") || message.contains("失败")) return false
+    if (message.startsWith("✓")) return true
+    return !message.contains("error", ignoreCase = true)
+}

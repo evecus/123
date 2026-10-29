@@ -42,8 +42,10 @@ import com.cablebee.assistant.services.AdbService
 import com.cablebee.assistant.services.PkgServerService
 import com.cablebee.assistant.ui.components.CbeeLoader
 import com.cablebee.assistant.ui.components.EmptyState
+import com.cablebee.assistant.ui.components.FloatingToast
 import com.cablebee.assistant.ui.components.LocalFilePickerSheet
 import com.cablebee.assistant.ui.components.WidePageBody
+import com.cablebee.assistant.ui.components.toastIsOk
 import com.cablebee.assistant.ui.theme.*
 import androidx.compose.foundation.BorderStroke
 import kotlinx.coroutines.Dispatchers
@@ -396,46 +398,9 @@ fun AppsScreen(
         }
     ) { padding ->
         // WidePageBody：平板限制 1200dp 居中（对应 Flutter WidePageBody）
-        WidePageBody(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        WidePageBody(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 操作结果提示条
-                if (actionResult != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 0.dp)
-                        .padding(top = 10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Bg1)
-                        .border(1.dp, Bg3, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Rounded.Info,
-                        contentDescription = null,
-                        tint = Primary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        actionResult!!,
-                        modifier = Modifier.weight(1f),
-                        fontFamily = JetBrainsMono,
-                        fontSize = 11.sp,
-                        color = TextSecondary
-                    )
-                    Icon(
-                        Icons.Rounded.Close,
-                        contentDescription = "关闭",
-                        tint = TextMuted,
-                        modifier = Modifier
-                            .size(14.dp)
-                            .clickable { actionResult = null }
-                    )
-                }
-            }
-
             // 计数徽章
             Row(
                 modifier = Modifier
@@ -506,6 +471,16 @@ fun AppsScreen(
             }
             }
         }
+        FloatingToast(
+            message = actionResult,
+            ok = actionResult?.let { toastIsOk(it) } ?: true,
+            onDismiss = { actionResult = null },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 8.dp)
+        )
+        } // Box
     }
 
     // ── 对话框 ────────────────────────────────────────────────────────────────
