@@ -337,9 +337,8 @@ fun ToolsScreen(
         ok = resultOk,
         onDismiss = { resultMsg = null },
         modifier = Modifier
-            .align(Alignment.TopCenter)
-            .statusBarsPadding()
-            .padding(top = 8.dp)
+            .align(Alignment.BottomCenter)
+            .padding(bottom = 12.dp)
     )
     } // Box
 

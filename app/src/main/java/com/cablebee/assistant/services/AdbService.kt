@@ -344,6 +344,8 @@ class AdbService {
 
     suspend fun getDeviceInfo(): Map<String, String> {
         val sep = "<<<SEP>>>"
+        // 电池一次 dumpsys 再本地解析，避免 grep 误匹配 Max charging voltage
+        // MAC 多路径采集：sysfs / ip link / getprop / dumpsys wifi
         val result = shell(
             "getprop ro.product.model; echo \"$sep\";" +
             "getprop ro.product.brand; echo \"$sep\";" +
@@ -355,17 +357,22 @@ class AdbService {
             "wm density; echo \"$sep\";" +
             "cat /proc/meminfo | grep MemTotal; echo \"$sep\";" +
             "df /data; echo \"$sep\";" +
-            "dumpsys battery | grep level; echo \"$sep\";" +
-            "dumpsys battery | grep voltage; echo \"$sep\";" +
-            "dumpsys battery | grep temperature; echo \"$sep\";" +
-            "dumpsys battery | grep present; echo \"$sep\";" +
+            "dumpsys battery; echo \"$sep\";" +
             "getprop ro.build.version.release; echo \"$sep\";" +
             "getprop ro.build.version.sdk; echo \"$sep\";" +
             "getprop ro.build.version.security_patch; echo \"$sep\";" +
             "cat /proc/version; echo \"$sep\";" +
             "getprop ro.serialno; echo \"$sep\";" +
-            "ip addr show wlan0 2>/dev/null || ifconfig wlan0 2>/dev/null; echo \"$sep\";" +
-            "cat /sys/class/net/wlan0/address; echo \"$sep\";" +
+            "ip addr show wlan0 2>/dev/null; ip addr show wlan1 2>/dev/null; ifconfig wlan0 2>/dev/null; ifconfig wlan1 2>/dev/null; echo \"$sep\";" +
+            "cat /sys/class/net/wlan0/address 2>/dev/null; echo; " +
+            "cat /sys/class/net/wlan1/address 2>/dev/null; echo; " +
+            "ip -o link show 2>/dev/null; echo; " +
+            "getprop ro.boot.wifimacaddr; echo; " +
+            "getprop ro.boot.wifimac; echo; " +
+            "getprop ro.ril.oem.wifimac; echo; " +
+            "getprop persist.sys.wifi.mac; echo; " +
+            "getprop vendor.wlan.firmware.mac; echo; " +
+            "dumpsys wifi 2>/dev/null | grep -iE 'Mac.Address|mWifiInfo|WifiInfo'; echo \"$sep\";" +
             "settings get secure android_id"
         )
         val parts = result.stdout.split(sep)
@@ -399,32 +406,48 @@ class AdbService {
             if (avail != null) storageFree = "${"%.1f".format(avail / 1024.0 / 1024.0)} GB"
         }
 
+        // ── 电池：整段 dumpsys battery 本地解析 ──────────────────────────────
+        // 只匹配行首空白 + 字段名，避免命中 "Max charging voltage"
+        val batteryDump = at(10)
         var batteryLevel = "无"
         var batteryVolt = "无"
         var batteryTemp = "无"
-        val hasBattery = !at(13).contains("false")
-        if (hasBattery) {
-            val lvlMatch = Regex("""level:\s*(\d+)""").find(at(10))
-            if (lvlMatch != null) batteryLevel = "${lvlMatch.groupValues[1]}%"
-            val voltMatch = Regex("""voltage:\s*(\d+)""").find(at(11))
-            if (voltMatch != null) {
-                val mv = voltMatch.groupValues[1].toIntOrNull() ?: 0
-                batteryVolt = if (mv > 1000) "${"%.2f".format(mv / 1000.0)} V" else "$mv mV"
+        val hasBattery = !Regex("""(?m)^\s*present:\s*false""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(batteryDump)
+        if (hasBattery && batteryDump.isNotBlank()) {
+            Regex("""(?m)^\s*level:\s*(\d+)""").find(batteryDump)?.groupValues?.get(1)?.let {
+                batteryLevel = "$it%"
             }
-            val tempMatch = Regex("""temperature:\s*(\d+)""").find(at(12))
-            if (tempMatch != null) {
-                val t = tempMatch.groupValues[1].toIntOrNull() ?: 0
+            Regex("""(?m)^\s*voltage:\s*(\d+)""").find(batteryDump)?.groupValues?.get(1)?.let { raw ->
+                val mv = raw.toIntOrNull() ?: 0
+                // dumpsys 单位一般为 mV（约 3000–4500）；少数机型给 µV
+                batteryVolt = when {
+                    mv >= 1_000_000 -> "${"%.2f".format(mv / 1_000_000.0)} V"
+                    mv > 1000 -> "${"%.2f".format(mv / 1000.0)} V"
+                    mv > 0 -> "$mv mV"
+                    else -> "无"
+                }
+            }
+            Regex("""(?m)^\s*temperature:\s*(-?\d+)""").find(batteryDump)?.groupValues?.get(1)?.let { raw ->
+                val t = raw.toIntOrNull() ?: 0
                 batteryTemp = "${"%.1f".format(t / 10.0)} °C"
             }
         }
 
         var ipAddr = "无"
         // 兼容 `ip addr`（inet 192.168.1.5/24）与 5.0 ifconfig（inet addr:192.168.1.5）
-        val ipMatch = Regex("""inet\s+(?:addr[:\s]+)?(\d+\.\d+\.\d+\.\d+)""").find(at(19))
-        if (ipMatch != null) ipAddr = ipMatch.groupValues[1]
+        val ipMatch = Regex("""inet\s+(?:addr[:\s]+)?(\d+\.\d+\.\d+\.\d+)""")
+            .findAll(at(16))
+            .map { it.groupValues[1] }
+            .firstOrNull { it != "127.0.0.1" }
+        if (ipMatch != null) ipAddr = ipMatch
 
-        var mac = at(20).trim()
-        if (mac.isEmpty() || mac.contains("Permission") || mac == "02:00:00:00:00:00") mac = "无"
+        // ── MAC：多源提取，过滤隐私占位 02:00:00:00:00:00 / 全 0 ─────────────
+        var mac = parseWifiMac(at(17))
+        if (mac == "无") {
+            // 再从网卡信息块里找 link/ether / HWaddr
+            mac = parseWifiMac(at(16))
+        }
 
         // CPU 核数：本地数 /proc/cpuinfo 的 processor 行（Android 5.0 无 wc/nproc）
         var cores = at(5).lines().count { it.startsWith("processor") }.toString()
@@ -432,7 +455,7 @@ class AdbService {
 
         // 内核版本：从 /proc/version 提取（Android 5.0 无 uname）
         var kernel = "无"
-        val kernelMatch = Regex("""Linux version (\S+)""").find(at(17))
+        val kernelMatch = Regex("""Linux version (\S+)""").find(at(14))
         if (kernelMatch != null) kernel = kernelMatch.groupValues[1]
 
         return mapOf(
@@ -450,15 +473,40 @@ class AdbService {
             "battery_level" to batteryLevel,
             "battery_voltage" to batteryVolt,
             "battery_temp" to batteryTemp,
-            "android" to (if (at(14).isEmpty()) "无" else at(14)),
-            "sdk" to (if (at(15).isEmpty()) "无" else at(15)),
-            "security_patch" to (if (at(16).isEmpty()) "无" else at(16)),
+            "android" to (if (at(11).isEmpty()) "无" else at(11)),
+            "sdk" to (if (at(12).isEmpty()) "无" else at(12)),
+            "security_patch" to (if (at(13).isEmpty()) "无" else at(13)),
             "kernel" to kernel,
-            "serial" to (if (at(18).isEmpty()) "无" else at(18)),
+            "serial" to (if (at(15).isEmpty()) "无" else at(15)),
             "ip" to ipAddr,
             "mac" to mac,
-            "android_id" to (if (at(21).isEmpty()) "无" else at(21))
+            "android_id" to (if (at(18).isEmpty()) "无" else at(18))
         )
+    }
+
+    /** 从混合文本中提取第一个有效 Wi‑Fi MAC（排除随机化占位地址） */
+    private fun parseWifiMac(raw: String): String {
+        if (raw.isBlank()) return "无"
+        val macRe = Regex("""(?i)(?:link/ether|HWaddr|Mac\s*Address[=:\s]+|MAC[=:\s]+)?([0-9a-f]{2}(?::[0-9a-f]{2}){5})""")
+        val invalid = setOf(
+            "02:00:00:00:00:00",
+            "00:00:00:00:00:00",
+            "ff:ff:ff:ff:ff:ff"
+        )
+        for (m in macRe.findAll(raw)) {
+            val candidate = m.groupValues[1].lowercase()
+            if (candidate !in invalid && !candidate.startsWith("02:00:00")) {
+                return candidate
+            }
+        }
+        // 单独一行只有 MAC 的情况（sysfs address）
+        for (line in raw.lines()) {
+            val t = line.trim().lowercase()
+            if (t.matches(Regex("""[0-9a-f]{2}(?::[0-9a-f]{2}){5}""")) && t !in invalid) {
+                return t
+            }
+        }
+        return "无"
     }
 
     suspend fun screenshot(savePath: String): AdbCommandResult {

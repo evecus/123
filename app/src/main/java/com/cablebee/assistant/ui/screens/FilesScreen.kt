@@ -543,15 +543,14 @@ fun FilesScreen(
             )
         }
 
-        // 顶部悬浮提示（上传/下载结果等），3 秒自动消失
+        // 底部悬浮提示（上传/下载结果等），位于底栏上方，3 秒自动消失
         FloatingToast(
             message = transferMessage,
             ok = transferMessage?.let { toastIsOk(it) } ?: true,
             onDismiss = { transferMessage = null },
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 8.dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 12.dp)
         )
     }
 }

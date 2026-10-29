@@ -528,8 +528,8 @@ fun CbeeSnackbarHost(
 }
 
 /**
- * 顶部悬浮提示：不插入页面内容流，无关闭按钮，[durationMs] 后自动消失。
- * 请放在页面最外层 Box 内，用 Alignment.TopCenter。
+ * 底部悬浮提示：不透明背景，无关闭按钮，[durationMs] 后自动消失。
+ * 请放在页面最外层 Box 内，用 Alignment.BottomCenter（位于底部导航栏上方的内容区内）。
  */
 @Composable
 fun FloatingToast(
@@ -546,21 +546,21 @@ fun FloatingToast(
         onDismiss()
     }
 
-    val color = if (ok) Success else Danger
+    val bg = if (ok) Success else Danger
+    val fg = Bg0
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(color.copy(alpha = 0.12f))
-            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+            .background(bg) // 不透明实心背景
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error,
             contentDescription = null,
-            tint = color,
+            tint = fg,
             modifier = Modifier.size(16.dp)
         )
         Spacer(modifier = Modifier.width(10.dp))
@@ -569,7 +569,7 @@ fun FloatingToast(
             modifier = Modifier.weight(1f),
             fontFamily = JetBrainsMono,
             fontSize = 12.sp,
-            color = color,
+            color = fg,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis
         )

@@ -476,9 +476,8 @@ fun AppsScreen(
             ok = actionResult?.let { toastIsOk(it) } ?: true,
             onDismiss = { actionResult = null },
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 8.dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 12.dp)
         )
         } // Box
     }
