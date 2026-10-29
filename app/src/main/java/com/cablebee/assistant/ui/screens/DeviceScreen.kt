@@ -1,5 +1,6 @@
 package com.cablebee.assistant.ui.screens
 
+import android.content.Context
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -31,6 +32,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -45,18 +47,54 @@ import com.cablebee.assistant.ui.components.isExpanded
 import com.cablebee.assistant.ui.theme.*
 import kotlinx.coroutines.launch
 
-private data class TabItem(val icon: ImageVector, val label: String, val title: String)
-
-private val tabs = listOf(
-    TabItem(Icons.Rounded.Info, "信息", "信息"),
-    TabItem(Icons.Rounded.Build, "工具", "工具"),
-    TabItem(Icons.Rounded.Apps, "应用", "应用"),
-    TabItem(Icons.Rounded.Folder, "文件", "文件"),
-    TabItem(Icons.Rounded.Memory, "进程", "进程管理"),
-    TabItem(Icons.Rounded.Gamepad, "遥控", "遥控器"),
-    TabItem(Icons.Rounded.Cast, "投屏", "远程控制"),
-    TabItem(Icons.Rounded.Terminal, "Shell", "Shell"),
+/** 稳定 id，不随排序变化；内容页与投屏停流逻辑均按 id 判断 */
+data class TabItem(
+    val id: Int,
+    val icon: ImageVector,
+    val label: String,
+    val title: String
 )
+
+/** 默认顺序：信息 / 工具 / 应用 / 文件 / 进程 / 遥控 / 投屏 / 终端 */
+val DefaultTabItems = listOf(
+    TabItem(0, Icons.Rounded.Info, "信息", "信息"),
+    TabItem(1, Icons.Rounded.Build, "工具", "工具"),
+    TabItem(2, Icons.Rounded.Apps, "应用", "应用"),
+    TabItem(3, Icons.Rounded.Folder, "文件", "文件"),
+    TabItem(4, Icons.Rounded.Memory, "进程", "进程管理"),
+    TabItem(5, Icons.Rounded.Gamepad, "遥控", "遥控器"),
+    TabItem(6, Icons.Rounded.Cast, "投屏", "远程控制"),
+    TabItem(7, Icons.Rounded.Terminal, "终端", "终端"),
+)
+
+const val TAB_ORDER_PREF_KEY = "tab_order"
+const val TAB_ID_SCRCPY = 6
+
+fun loadTabOrder(context: Context): List<Int> {
+    val prefs = context.getSharedPreferences("cablebee", Context.MODE_PRIVATE)
+    val raw = prefs.getString(TAB_ORDER_PREF_KEY, null)
+    val default = DefaultTabItems.map { it.id }
+    if (raw.isNullOrBlank()) return default
+    val parsed = raw.split(",")
+        .mapNotNull { it.trim().toIntOrNull() }
+        .filter { it in default }
+        .distinct()
+    // 补齐缺失 id，防止升级后丢页
+    val missing = default.filter { it !in parsed }
+    return if (parsed.size + missing.size == default.size) parsed + missing else default
+}
+
+fun saveTabOrder(context: Context, order: List<Int>) {
+    context.getSharedPreferences("cablebee", Context.MODE_PRIVATE)
+        .edit()
+        .putString(TAB_ORDER_PREF_KEY, order.joinToString(","))
+        .apply()
+}
+
+fun tabsFromOrder(order: List<Int>): List<TabItem> {
+    val byId = DefaultTabItems.associateBy { it.id }
+    return order.mapNotNull { byId[it] }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,6 +105,9 @@ fun DeviceScreen(
     pkgServerService: PkgServerService,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    // 从设置读取底部导航排序；进入页面时读一次，设置改完后下次进入生效
+    val tabs = remember { tabsFromOrder(loadTabOrder(context)) }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var disconnectHandled by remember { mutableStateOf(false) }
     var showDisconnectDialog by remember { mutableStateOf(false) }
@@ -76,6 +117,11 @@ fun DeviceScreen(
 
     val selectedDevice by adbService.selectedDevice.collectAsState()
     val scope = rememberCoroutineScope()
+
+    // 防止排序后 tab 越界
+    LaunchedEffect(tabs.size) {
+        if (tab !in tabs.indices) tab = 0
+    }
 
     // 初始化：选中设备
     LaunchedEffect(device) {
@@ -205,6 +251,18 @@ fun DeviceScreen(
     val tabCreated = remember { mutableStateMapOf<Int, Boolean>() }
     tabCreated[tab] = true
 
+    fun switchTab(newTab: Int) {
+        val oldId = tabs.getOrNull(tab)?.id
+        val newId = tabs.getOrNull(newTab)?.id
+        // 离开投屏页时自动停止投屏（按稳定 id 判断，不依赖显示位置）
+        if (oldId == TAB_ID_SCRCPY && newId != TAB_ID_SCRCPY) {
+            scrcpyManager.stop()
+        }
+        tab = newTab
+        tabActions = {}
+        actionsVersion++
+    }
+
     @Composable
     fun TabBody(index: Int, visible: Boolean) {
         // 关键：可见 Tab 必须在 Z 轴最上层。否则索引更大的隐藏 Tab 的触摸拦截层
@@ -215,8 +273,10 @@ fun DeviceScreen(
         val onActionsChanged: (@Composable RowScope.() -> Unit) -> Unit = { slot ->
             if (index == tab) tabActions = slot
         }
+        val tabId = tabs.getOrNull(index)?.id ?: index
         Box(modifier = modifier) {
-            when (index) {
+            // 按稳定 id 渲染内容，排序只改变导航顺序
+            when (tabId) {
                 0 -> DeviceInfoScreen(adbService, onActionsChanged, actionsVersion)
                 1 -> ToolsScreen(adbService, onActionsChanged, actionsVersion)
                 2 -> AppsScreen(adbService, onActionsChanged, actionsVersion)
@@ -253,12 +313,7 @@ fun DeviceScreen(
                 DeviceSideNav(
                     tabs = tabs,
                     selectedIndex = tab,
-                    onTap = { newTab ->
-                        if (tab == 6 && newTab != 6) scrcpyManager.stop()
-                        tab = newTab
-                        tabActions = {}
-                        actionsVersion++
-                    }
+                    onTap = { switchTab(it) }
                 )
                 Box(
                     modifier = Modifier
@@ -282,15 +337,7 @@ fun DeviceScreen(
                 ScrollableBottomNav(
                     tabs = tabs,
                     selectedIndex = tab,
-                    onTap = { newTab ->
-                        // 离开投屏 Tab 时自动停止投屏
-                        if (tab == 6 && newTab != 6) {
-                            scrcpyManager.stop()
-                        }
-                        tab = newTab
-                        tabActions = {}
-                        actionsVersion++
-                    }
+                    onTap = { switchTab(it) }
                 )
             },
             containerColor = Bg0

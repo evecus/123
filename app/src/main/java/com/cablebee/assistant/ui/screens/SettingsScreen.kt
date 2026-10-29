@@ -46,6 +46,17 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
     var showPathDialog by remember { mutableStateOf(false) }
     var pathInvalid by remember { mutableStateOf(false) }
 
+    // ── 底部导航排序 ──
+    var tabOrder by remember { mutableStateOf(loadTabOrder(context)) }
+    fun moveTab(from: Int, to: Int) {
+        if (to !in tabOrder.indices) return
+        val list = tabOrder.toMutableList()
+        val item = list.removeAt(from)
+        list.add(to, item)
+        tabOrder = list
+        saveTabOrder(context, list)
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -245,6 +256,110 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
                                     fontSize = 10.sp,
                                     color = TextMuted
                                 )
+                            )
+                        }
+                    }
+                }
+
+                // ── 底部导航排序 ──
+                item { Spacer(modifier = Modifier.height(8.dp)) }
+                item { SectionHeader("底部导航排序") }
+
+                item {
+                    Column(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Bg1)
+                            .border(1.dp, Bg3, RoundedCornerShape(12.dp))
+                    ) {
+                        Text(
+                            "调整左右顺序，进入设备页后生效",
+                            style = TextStyle(
+                                fontFamily = JetBrainsMono,
+                                fontSize = 10.sp,
+                                color = TextMuted
+                            ),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                        Divider(color = Bg3)
+                        val byId = DefaultTabItems.associateBy { it.id }
+                        tabOrder.forEachIndexed { index, id ->
+                            val item = byId[id] ?: return@forEachIndexed
+                            if (index > 0) Divider(color = Bg3, modifier = Modifier.padding(start = 56.dp))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(Primary.copy(alpha = 0.1f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        item.icon,
+                                        contentDescription = null,
+                                        tint = Primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    item.label,
+                                    modifier = Modifier.weight(1f),
+                                    style = TextStyle(
+                                        fontFamily = SpaceMono,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                )
+                                IconButton(
+                                    onClick = { moveTab(index, index - 1) },
+                                    enabled = index > 0,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.KeyboardArrowUp,
+                                        contentDescription = "上移",
+                                        tint = if (index > 0) TextSecondary else Bg3,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { moveTab(index, index + 1) },
+                                    enabled = index < tabOrder.lastIndex,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.KeyboardArrowDown,
+                                        contentDescription = "下移",
+                                        tint = if (index < tabOrder.lastIndex) TextSecondary else Bg3,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Divider(color = Bg3)
+                        TextButton(
+                            onClick = {
+                                val def = DefaultTabItems.map { it.id }
+                                tabOrder = def
+                                saveTabOrder(context, def)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                "恢复默认顺序",
+                                fontFamily = SpaceMono,
+                                fontSize = 12.sp,
+                                color = TextMuted
                             )
                         }
                     }
