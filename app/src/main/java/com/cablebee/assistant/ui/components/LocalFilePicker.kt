@@ -142,22 +142,11 @@ fun LocalFilePickerSheet(
 
     val sheetContent: @Composable () -> Unit = {
         Column(modifier = Modifier.fillMaxSize()) {
-            // ── 顶部把手 ──
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 10.dp, bottom = 4.dp)
-                    .width(36.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Bg3)
-            )
-
-            // ── 标题栏 ──
+            // ── 标题栏（把手由 ModalBottomSheet 统一提供，避免双条）──
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, top = 4.dp, end = 8.dp),
+                    .padding(start = 16.dp, top = 0.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
@@ -266,7 +255,10 @@ fun LocalFilePickerSheet(
             ) {
                 breadcrumbs.forEachIndexed { index, path ->
                     val isLast = index == breadcrumbs.lastIndex
-                    val label = path.trimEnd('/').substringAfterLast('/').ifEmpty { "根目录" }
+                    val label = when {
+                        path == "/storage/emulated/0" || path == "/sdcard" -> "内部存储"
+                        else -> path.trimEnd('/').substringAfterLast('/').ifEmpty { "根目录" }
+                    }
                     Text(
                         label,
                         fontFamily = JetBrainsMono,
@@ -470,6 +462,9 @@ fun LocalFilePickerSheet(
         onDismissRequest = onDismiss,
         containerColor = Bg0,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        // 只保留系统自带的一条拖动手柄，去掉内容区自定义把手，避免顶部双条 + 大片空白
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+        windowInsets = WindowInsets(0, 0, 0, 0),
         modifier = if (configuration.screenWidthDp >= 600) {
             // 平板上限制弹窗宽度并居中（对应 Flutter ConstrainedBox maxWidth 560）
             Modifier.width(560.dp)

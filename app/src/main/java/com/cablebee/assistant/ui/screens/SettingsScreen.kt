@@ -1,7 +1,12 @@
 package com.cablebee.assistant.ui.screens
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,9 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.cablebee.assistant.services.AdbService
-import com.cablebee.assistant.ui.components.ActionTile
 import com.cablebee.assistant.ui.components.PageBody
 import com.cablebee.assistant.ui.components.SectionHeader
 import com.cablebee.assistant.ui.theme.*
@@ -37,14 +40,33 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
     val serverRunning by adbService.serverRunning.collectAsState()
     val scope = rememberCoroutineScope()
 
-    // ── 本机默认保存路径（对应 Flutter local_save_path）────────────────────────
+    // ── 保存路径（系统文件夹选择器）──────────────────────────────────────────
     val prefs = context.getSharedPreferences("cablebee", Context.MODE_PRIVATE)
-    val defaultLocalSavePath = "/sdcard/download/cablebee"
+    val defaultLocalSavePath = "/sdcard/Download/CableBee"
     var localSavePath by remember {
         mutableStateOf(prefs.getString("local_save_path", null) ?: defaultLocalSavePath)
     }
-    var showPathDialog by remember { mutableStateOf(false) }
-    var pathInvalid by remember { mutableStateOf(false) }
+
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+            // 部分设备不支持持久授权，忽略
+        }
+        val path = treeUriToAbsolutePath(uri)
+        if (path != null) {
+            prefs.edit().putString("local_save_path", path).apply()
+            localSavePath = path
+        } else {
+            Toast.makeText(context, "无法解析该目录路径，请选择内部存储下的文件夹", Toast.LENGTH_LONG).show()
+        }
+    }
 
     // ── 底部导航排序 ──
     var tabOrder by remember { mutableStateOf(loadTabOrder(context)) }
@@ -167,15 +189,7 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
                                 )
                             }
                         }
-                        Divider(color = Bg3)
-                        ActionTile(
-                            icon = Icons.Rounded.Refresh,
-                            title = "刷新设备列表",
-                            subtitle = "立即重新扫描已连接设备",
-                            iconColor = Warning,
-                            onTap = { scope.launch { adbService.refreshDevices() } }
-                        )
-                    }
+                        }
                 }
 
                 // ── 文件管理 ──
@@ -190,7 +204,13 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
                             .border(1.dp, Bg3, RoundedCornerShape(12.dp))
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    // 用系统文件管理器选择文件夹
+                                    folderPicker.launch(null)
+                                }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
@@ -210,7 +230,7 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    "本机默认保存路径",
+                                    "保存路径",
                                     style = TextStyle(
                                         fontFamily = SpaceMono,
                                         fontSize = 13.sp,
@@ -225,37 +245,15 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
                                         fontSize = 11.sp,
                                         color = TextMuted
                                     ),
-                                    maxLines = 1,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            IconButton(onClick = { showPathDialog = true }) {
-                                Icon(
-                                    Icons.Rounded.Edit,
-                                    contentDescription = "修改本机路径",
-                                    tint = Success,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                        Divider(color = Bg3)
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                        ) {
                             Icon(
-                                Icons.Rounded.Info,
-                                contentDescription = null,
-                                tint = TextMuted,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "截图、文件下载、APK 提取均保存到此路径。路径无效时自动恢复默认值。",
-                                style = TextStyle(
-                                    fontFamily = JetBrainsMono,
-                                    fontSize = 10.sp,
-                                    color = TextMuted
-                                )
+                                Icons.Rounded.FolderOpen,
+                                contentDescription = "选择文件夹",
+                                tint = Success,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
@@ -370,96 +368,33 @@ fun SettingsScreen(adbService: AdbService, context: Context, onBack: () -> Unit)
         }
     }
 
-    // ── 修改本机默认保存路径对话框（对应 Flutter _editLocalSavePath）──────────
-    if (showPathDialog) {
-        var text by remember { mutableStateOf(localSavePath) }
-        Dialog(onDismissRequest = { showPathDialog = false }) {
-            androidx.compose.material3.Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Bg1,
-                border = androidx.compose.foundation.BorderStroke(1.dp, Bg3)
-            ) {
-                Column(modifier = Modifier.padding(24.dp)) {
-                    Text(
-                        "本机默认保存路径",
-                        style = TextStyle(
-                            fontFamily = SpaceMono,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it },
-                        singleLine = true,
-                        label = {
-                            Text(
-                                "本机绝对路径",
-                                fontFamily = JetBrainsMono,
-                                fontSize = 12.sp,
-                                color = TextMuted
-                            )
-                        },
-                        placeholder = {
-                            Text(
-                                defaultLocalSavePath,
-                                fontFamily = JetBrainsMono,
-                                fontSize = 12.sp,
-                                color = TextMuted
-                            )
-                        },
-                        textStyle = TextStyle(
-                            fontFamily = JetBrainsMono,
-                            fontSize = 12.sp,
-                            color = TextPrimary
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Primary,
-                            unfocusedBorderColor = Bg3,
-                            focusedContainerColor = Bg0,
-                            unfocusedContainerColor = Bg0
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(onClick = { showPathDialog = false }) {
-                            Text("取消", fontFamily = SpaceMono, fontSize = 12.sp, color = TextMuted)
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                val v = text.trim()
-                                // 校验：必须以 / 开头且不含连续 //（对应 Flutter _isValidPath）
-                                val valid = v.isNotEmpty() && v.startsWith("/") && !v.contains("//")
-                                val effective = if (valid) v else defaultLocalSavePath
-                                prefs.edit().putString("local_save_path", effective).apply()
-                                localSavePath = effective
-                                pathInvalid = !valid
-                                showPathDialog = false
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = Bg0)
-                        ) {
-                            Text("保存", fontFamily = SpaceMono, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
     }
 
-    // 路径无效提示（对应 Flutter SnackBar）
-    if (pathInvalid) {
-        LaunchedEffect(Unit) {
-            Toast.makeText(context, "路径无效，已恢复为默认路径", Toast.LENGTH_LONG).show()
-            pathInvalid = false
+/**
+ * 将系统文件夹选择器返回的 tree URI 转为绝对路径。
+ * 支持 primary: 内部存储；其余卷（如 SD 卡）尝试 /storage/<id>/ 映射。
+ */
+private fun treeUriToAbsolutePath(uri: Uri): String? {
+    return try {
+        val docId = DocumentsContract.getTreeDocumentId(uri)
+        when {
+            docId.equals("primary", ignoreCase = true) ->
+                "/storage/emulated/0"
+            docId.startsWith("primary:", ignoreCase = true) -> {
+                val rel = docId.substringAfter(":")
+                if (rel.isEmpty()) "/storage/emulated/0"
+                else "/storage/emulated/0/$rel"
+            }
+            ":" in docId -> {
+                // 例如 XXXX-XXXX:Download → /storage/XXXX-XXXX/Download
+                val volume = docId.substringBefore(":")
+                val rel = docId.substringAfter(":")
+                if (rel.isEmpty()) "/storage/$volume" else "/storage/$volume/$rel"
+            }
+            else -> null
         }
+    } catch (_: Exception) {
+        null
     }
 }
 
