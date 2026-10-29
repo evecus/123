@@ -359,9 +359,9 @@ class AdbService {
             "cat /proc/meminfo 2>/dev/null | grep MemTotal; $e; " +
             "df /data; $e; " +
             "dumpsys battery; $e; " +
-            // sysfs 电压（µV），比 dumpsys 更准
+            // sysfs 电压（µV），比 dumpsys 更准；用 $() 不用反引号，避免 Kotlin Illegal escape
             "for d in /sys/class/power_supply/*; do " +
-            "  n=\`cat \"\$d/type\" 2>/dev/null\`; " +
+            "  n=\$(cat \"\$d/type\" 2>/dev/null); " +
             "  if [ \"\$n\" = Battery ] || [ \"\$n\" = battery ]; then " +
             "    cat \"\$d/voltage_now\" 2>/dev/null; break; " +
             "  fi; " +
