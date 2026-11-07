@@ -1,0 +1,149 @@
+name: Build adb (arm64-v8a, 16KB aligned)
+
+# 手动触发。从 AndroidIDEOfficial/platform-tools 源码重新编译 adb，
+# 链接时加 -z max-page-size=16384，使 ELF 满足 16 KB 页对齐，
+# 产物可改名为 libcablebee_adb.so 放进 app/src/main/jniLibs/arm64-v8a/
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'platform-tools 源码 tag（必须与仓库 CMakeLists.txt 的 TOOLS_VERSION 一致，当前为 34.0.4）'
+        default: 'platform-tools-34.0.4'
+        required: true
+      ndk:
+        description: 'NDK 版本（README 要求 r26）'
+        default: 'r26d'
+        required: true
+
+jobs:
+  build-adb:
+    # 用 22.04（GCC 11）：旧版 protobuf 3.21 在 24.04 的 GCC 13 下会编译失败
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 git build-essential cmake ninja-build bison flex wget zip unzip tar
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ inputs.ndk }}
+          add-to-path: false
+
+      - name: Clone platform-tools
+        run: git clone --depth 1 https://github.com/AndroidIDEOfficial/platform-tools.git tools
+
+      - name: Fetch sources
+        working-directory: tools
+        run: python3 get_source.py --tag=${{ inputs.tag }}
+
+      - name: Apply patches
+        working-directory: tools
+        run: |
+          # 补丁路径是相对 tools/ 根目录的（a/src/xxx），必须在根目录应用
+          for p in $(ls patches/*.patch | sort); do
+            if git apply --check "$p" 2>/dev/null; then
+              git apply "$p"
+              echo "applied: $p"
+            elif git apply --check -R "$p" 2>/dev/null; then
+              echo "already applied: $p"
+            else
+              echo "::error::patch 无法应用: $p"
+              git apply --check "$p" || true
+              exit 1
+            fi
+          done
+          # 确认关键补丁生效
+          grep -n 'protobuf_SOURCE_DIR}/config' src/protobuf/CMakeLists.txt
+
+      - name: Build host protoc
+        working-directory: tools/src/protobuf
+        env:
+          # 兜底：旧代码缺少 <cstdint> 时，新编译器会报错
+          CXXFLAGS: -include cstdint
+        run: |
+          ln -sf "$(realpath ../googletest)" third_party/googletest
+          cmake -GNinja -Dprotobuf_BUILD_TESTS=OFF .
+          ninja -j"$(nproc)"
+
+      - name: Setup boringssl
+        working-directory: tools
+        run: ln -sf "$(realpath ./src/googletest/googletest)" ./src/boringssl/src/third_party/googletest
+
+      - name: Add 16KB linker flags to build.py
+        working-directory: tools
+        run: |
+          python3 - <<'PY'
+          p = 'build.py'
+          s = open(p, encoding='utf-8').read()
+          a = '"-DCMAKE_BUILD_TYPE=Release"]'
+          assert a in s, 'build.py 结构变化，找不到 CMAKE_BUILD_TYPE'
+          flags = '-Wl,-z,max-page-size=16384'
+          b = ('"-DCMAKE_BUILD_TYPE=Release",\n'
+               f'               "-DCMAKE_EXE_LINKER_FLAGS={flags}",\n'
+               f'               "-DCMAKE_SHARED_LINKER_FLAGS={flags}",\n'
+               f'               "-DCMAKE_MODULE_LINKER_FLAGS={flags}"]')
+          open(p, 'w', encoding='utf-8').write(s.replace(a, b, 1))
+          PY
+          grep -n "max-page-size" build.py
+
+      - name: Build adb (arm64-v8a)
+        working-directory: tools
+        run: |
+          python3 build.py \
+            --ndk="${{ steps.ndk.outputs.ndk-path }}" \
+            --api=30 \
+            --abi=arm64-v8a \
+            --protoc="$PWD/src/protobuf/protoc" \
+            --build=build/aarch64 \
+            --target=adb \
+            --job="$(nproc)"
+
+      - name: Locate adb and check 16KB alignment
+        working-directory: tools
+        run: |
+          ADB=$(find build/aarch64 -type f -name adb -path '*platform-tools*' | head -1)
+          [ -n "$ADB" ] || { echo "::error::没找到编译出的 adb"; find build/aarch64 -maxdepth 4 -type f | head -50; exit 1; }
+          echo "ADB=$ADB" >> "$GITHUB_ENV"
+          file "$ADB"
+          readelf -lW "$ADB" | grep -E "LOAD|Type"
+          python3 - "$ADB" <<'PY'
+          import re, subprocess, sys
+          out = subprocess.check_output(['readelf', '-lW', sys.argv[1]], text=True)
+          bad = 0
+          for line in out.splitlines():
+              if line.strip().startswith('LOAD'):
+                  f = line.split()
+                  off, vaddr, align = int(f[1], 16), int(f[2], 16), int(f[-1], 16)
+                  ok = align >= 0x4000 and off % 0x4000 == vaddr % 0x4000
+                  print(('OK  ' if ok else 'BAD ') + line.strip())
+                  bad += (not ok)
+          if bad:
+              print('::error::仍有 LOAD 段未满足 16KB 对齐（链接参数可能被子项目覆盖）')
+              sys.exit(1)
+          print('所有 LOAD 段均满足 16KB 对齐')
+          PY
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p out
+          cp "tools/$ADB" out/libcablebee_adb.so
+          ls -l out
+          # 简单确认能识别版本（交叉编译产物无法在 x86 runner 运行，这里只做文件检查）
+          sha256sum out/libcablebee_adb.so
+
+      - name: Upload libcablebee_adb.so (arm64-v8a, 16KB aligned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcablebee_adb-arm64-v8a-16k
+          path: out/libcablebee_adb.so
+          if-no-files-found: error
